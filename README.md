@@ -17,7 +17,23 @@
 
 ---
 
-## 설치와 실행
+## 실행 방법
+
+**배포된 링크로 보는 경우** — 아무 파일도 열 필요가 없다. 브라우저 주소만 열면 된다.
+
+**내 PC에서 돌리는 경우** — 저장소를 받은 뒤(Code → Download ZIP 또는 `git clone`),
+
+| 운영체제 | 방법 |
+|---|---|
+| Windows | `run.bat` **더블클릭** |
+| macOS / Linux | 터미널에서 `bash run.sh` |
+
+처음 한 번은 파이썬 환경을 만드느라 1~3분 걸리고, 그다음부터는 바로 켜진다.
+브라우저가 자동으로 열리지 않으면 `http://localhost:8501` 로 들어가면 된다. 종료는 창에서 Ctrl+C.
+파이썬이 없으면 [python.org](https://www.python.org/downloads/) 에서 설치하고,
+설치 화면의 "Add python.exe to PATH" 를 체크한다.
+
+**직접 명령으로 실행·시험하는 경우** (PowerShell은 `&&` 대신 `;` 를 쓴다)
 
 ```bash
 python -m venv .venv
@@ -25,6 +41,8 @@ python -m venv .venv
 .venv/Scripts/python -m pytest -q                 # 테스트
 .venv/Scripts/streamlit run app.py                # UI
 ```
+
+`app.py` 는 더블클릭으로 열리는 파일이 아니라 Streamlit 진입점이다. 반드시 `streamlit run` 으로 실행한다.
 
 가상 데이터를 다시 만들려면:
 
