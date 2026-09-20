@@ -20,7 +20,7 @@ from chiton_sim.calibration import (
     CRITERIA_SUGGESTIONS, FailureCriteria, RigSetup, fit_plate_stiffness, fold_trend,
     load_criteria, run_calibration, save_criteria, validate_schema,
 )
-from chiton_sim.contact import SRC_THORNTON, SRC_YIELD_16, effective_modulus
+from chiton_sim.contact import SRC_THORNTON, SRC_YIELD_16, ThorntonLaw, effective_modulus
 from chiton_sim.fall import H_MAX, H_MIN, FallParams, simulate_fall
 from chiton_sim.failure import (
     energy_balance, failure_probability_curve, main_judgment, reference_judgment,
@@ -36,7 +36,7 @@ from chiton_sim.helmet import (
     shell_mass, simulate_headform, thickness_for_mass,
 )
 from chiton_sim.impact import IMPULSE_NOTE
-from chiton_sim.compare import compare_materials, rank
+from chiton_sim.compare import compare_materials, critical_height, rank
 from chiton_sim.materials import (
     BAMBU_PLA_BASIC, EPP_ARPRO_TABLE, EPP_NOTE, MATERIAL_LIBRARY, epp_stress, material_warnings,
     user_filament,
@@ -508,10 +508,35 @@ def tab_impact(s):
         verdict = f"{verdict} / 주판정 {'파손' if main.fail else '유지'}"
     cuts = current_cuts()
     g_margin = grade(ref.margin, margin_scale(cuts))
-    cols[5].metric("판정", f"{verdict} · {g_margin.letter}", f"여유율 {ref.margin:.2f}")
+    cols[5].metric("판정", verdict, f"여유율 {ref.margin:.2f}")
     st.caption(f"등급 {g_margin.letter} — {g_margin.meaning} ({g_margin.anchor_text}; {cuts_note(cuts)})")
     st.caption(f"참고 판정: 굽힘응력 {case.sigma_local/1e6:.0f} MPa vs 굽힘강도 {ref.strength/1e6:.0f} MPa "
                f"[문헌값] · 주 판정: {q_text(main.Ec, unit='J')} · {IMPULSE_NOTE}")
+
+    # --- 등급 (크게) ------------------------------------------------------
+    plate_g = plate_from_material(mat, cfg.orientation, cfg.thickness, cfg.ring_radius, bc0,
+                                  membrane=cfg.membrane, k_measured=cfg.k_measured,
+                                  km_measured=cfg.km_measured)
+    law_g = ThorntonLaw(effective_modulus(s["ball"].material.E.require(),
+                                          s["ball"].material.nu.require(), plate_g.E, plate_g.nu),
+                        s["ball"].radius, py.require("p_y"))
+    h50_val = critical_height(s["ball"], plate_g, law_g, strength.require(), imp, fall,
+                              s["tube"], params)
+    ad_val = areal_density(mat.density.require("밀도"), cfg.thickness, overlap_ratio(cfg).value or 0.0)
+    target_h = assumed(st.session_state.get("target_h_m", 2.0), "m", "목표 임계 높이(사용자)")
+    g_h50 = grade(h50_val, h50_scale(target_h, cuts))
+    g_ad = grade(ad_val, areal_density_scale(FASTSF_AREAL_DENSITY, cuts))
+    g_all = overall([g_margin, g_h50, g_ad], min_known=2)
+
+    st.markdown("##### 등급")
+    gc = st.columns(4)
+    show_grade(gc[0], "종합", g_all)
+    show_grade(gc[1], "굽힘응력 여유율", g_margin, f"<br>현재 {ref.margin:.2f}")
+    show_grade(gc[2], "임계 높이 h50", g_h50,
+               f"<br>현재 {h50_val:.2f} m" if h50_val else "<br>20 m 안에서 파손 없음")
+    show_grade(gc[3], "면밀도", g_ad, f"<br>현재 {units.kg_m2_to_g_cm2(ad_val):.3f} g/cm²")
+    st.caption(f"점수 = 기준선 대비 여유(1.0 = 기준 충족 = C). {cuts_note(cuts)} · "
+               "경계는 사이드바 '등급 기준'에서 바꾼다")
 
     if len(assess.cases) > 1:
         other = assess.cases["simply_supported"]
@@ -878,7 +903,12 @@ def tab_materials(s):
         "여유율": r.margin, "흡수 에너지 [J]": r.E_abs,
         "h50 [m]": r.h50, "판정": ("-" if r.margin is None else ("유지" if r.margin >= 1 else "파손")),
     } for i, r in enumerate(rows)])
-    st.dataframe(df.round(3), width="stretch", hide_index=True)
+    grade_cols = ["종합", "여유율 등급", "면밀도 등급", "무게 등급", "h50 등급", "강성 등급(상대)"]
+    styled = (df.round(3).style
+              .map(lambda v: f"background-color:{GRADE_COLOR.get(v, '#FFFFFF')}22;"
+                             f"color:{GRADE_COLOR.get(v, '#1A1A1A')};font-weight:700;"
+                             "text-align:center", subset=grade_cols))
+    st.dataframe(styled, width="stretch", hide_index=True)
     st.caption(
         "등급 기준 — 여유율: 응력 = 굽힘강도인 물리적 경계 [계산값] · "
         f"면밀도: FAST SF {units.kg_m2_to_g_cm2(FASTSF_AREAL_DENSITY.value)*1e4:.0f} g/m² [문헌값] · "

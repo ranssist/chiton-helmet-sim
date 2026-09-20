@@ -123,12 +123,13 @@ def compare_materials(
         row.strength, row.margin, row.E_abs = sf, judg.margin, imp.E_abs
         row.impact = imp
         if with_h50:
-            row.h50 = _h50(ball, plate, law, sf, imp, fall, tube, fall_params)
+            row.h50 = critical_height(ball, plate, law, sf, imp, fall, tube, fall_params)
         rows.append(row)
     return rows
 
 
-def _h50(ball, plate, law, sf, imp_ref, fall_ref, tube, fall_params) -> float | None:
+def critical_height(ball, plate, law, sf, imp_ref, fall_ref, tube=None,
+                    fall_params: FallParams = FallParams()) -> float | None:
     """참고 판정이 뒤집히는 높이. 2자유도 명목해로 보정한 에너지 균형 모델로 빠르게 푼다(A-17)."""
     R = ball.radius
     F_eb_ref, _, _ = energy_balance(fall_ref.energy, law.E_star, R, law.py,
