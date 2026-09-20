@@ -1,0 +1,8 @@
+# Python 3.12+ (개발·검증은 3.14.6에서 했다)
+numpy>=2.0
+scipy>=1.14
+pandas>=2.2
+statsmodels>=0.14
+streamlit>=1.40
+plotly>=5.20
+pytest>=8.0

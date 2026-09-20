@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+primaryColor = "#C2410C"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F5"
+textColor = "#1A1A1A"
+font = "sans serif"
+
+[server]
+# headless = false 가 기본이라 실행하면 브라우저가 자동으로 열린다
+port = 8501

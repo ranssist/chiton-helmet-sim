@@ -1,0 +1,15 @@
+# 가상환경·캐시
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 실행 중 생기는 파일
+*.log
+data/criteria.json          # 실험별 파손 판정 기준(로컬 기록)
+
+# OS·에디터
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
