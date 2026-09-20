@@ -25,6 +25,10 @@ from chiton_sim.fall import H_MAX, H_MIN, FallParams, simulate_fall
 from chiton_sim.failure import (
     energy_balance, failure_probability_curve, main_judgment, reference_judgment,
 )
+from chiton_sim.grading import (
+    DEFAULT_CUTS, GRADE_MEANING, areal_density_scale, blunt_g_scale, bottoming_scale, cuts_note,
+    grade, h50_scale, margin_scale, measurement_scale, overall, relative_grades, shell_mass_scale,
+)
 from chiton_sim.helmet import (
     BLUNT_G_LIMIT, BLUNT_VELOCITY, FASTSF_AREAL_DENSITY, FASTSF_SHELL_L_DATASHEET,
     FASTSF_SHELL_L_NEXTGEN, FASTSF_SIZES, FASTSF_XXL_NOTE, FMVSS218_HEADFORMS, LinerModel,
@@ -100,6 +104,31 @@ def download_df(df: pd.DataFrame, name: str, key: str) -> None:
                        file_name=name, mime="text/csv", key=key)
 
 
+def current_cuts():
+    ss = st.session_state
+    return (ss.get("cutA", DEFAULT_CUTS[0]), ss.get("cutB", DEFAULT_CUTS[1]),
+            ss.get("cutC", DEFAULT_CUTS[2]), ss.get("cutD", DEFAULT_CUTS[3]),
+            ss.get("cutE", DEFAULT_CUTS[4]))
+
+
+GRADE_COLOR = {"A": "#1B7F3B", "B": "#4C9A2A", "C": "#B58A00", "D": "#C2410C",
+               "E": "#B3261E", "F": "#7A1B14", "-": "#888888"}
+
+
+def grade_badge(g) -> str:
+    """등급을 한 줄 문자열로. 수치·기준선·절대/상대 구분을 같이 적는다."""
+    tag = "상대" if g.kind == "상대" else ""
+    return f"{g.letter} ({g.anchor_text}{', ' + tag if tag else ''})"
+
+
+def show_grade(col, label: str, g, extra: str = "") -> None:
+    col.markdown(
+        f"<div style='font-size:0.8rem;color:#666'>{label}</div>"
+        f"<div style='font-size:1.6rem;font-weight:700;color:{GRADE_COLOR[g.letter]}'>{g.letter}</div>"
+        f"<div style='font-size:0.75rem;color:#666'>{g.meaning or '-'}<br>{g.anchor_text}{extra}</div>",
+        unsafe_allow_html=True)
+
+
 PLOT_CONFIG = {"displaylogo": False, "toImageButtonOptions": {"format": "png", "scale": 2}}
 
 
@@ -117,6 +146,9 @@ DEFAULTS = {
     "fst": "(없음)", "fn": 4, "fd": 4.0, "fp": 20.0, "fe": 8.0,
     "use_lim": False, "pd_min": 4.0, "ed_min": 3.0,
     "vt": "(없음)", "vn": 6, "vd": 8.0,
+    "cutA": DEFAULT_CUTS[0], "cutB": DEFAULT_CUTS[1], "cutC": DEFAULT_CUTS[2],
+    "cutD": DEFAULT_CUTS[3], "cutE": DEFAULT_CUTS[4],
+    "target_mass_g": 557.0, "target_h_m": 2.0,
 }
 PRESETS = {
     "낙하탑 1.5 m": {"height": 1.5, "use_tube": True, "tube_mode": "직접 입력", "tube_len": 1.5,
@@ -289,6 +321,20 @@ def sidebar():
             st.markdown("**p_y / Y 비율** — 압흔 실측으로 보정하기 전 가정값 (문헌 범위 1.6–3.0)")
             st.slider("p_y / Y", 1.6, 3.0, key="py_ratio", step=0.1, label_visibility="collapsed")
 
+        with st.expander("등급 기준 (A~F)"):
+            st.caption("점수 = 기준선 대비 여유(1.0 = 기준 충족). 경계값은 문헌 근거가 없는 가정이라 "
+                       "여기서 바꿀 수 있고, 표에는 항상 원래 수치와 기준선을 같이 보여 준다.")
+            c1, c2 = st.columns(2)
+            c1.number_input("A 이상", 1.0, 5.0, key="cutA", step=0.05)
+            c2.number_input("B 이상", 1.0, 5.0, key="cutB", step=0.05)
+            c1.number_input("C 이상 (기준 충족)", 0.5, 3.0, key="cutC", step=0.05)
+            c2.number_input("D 이상", 0.1, 2.0, key="cutD", step=0.05)
+            c1.number_input("E 이상", 0.1, 2.0, key="cutE", step=0.05)
+            c2.number_input("목표 셸 무게 [g]", 100.0, 3000.0, key="target_mass_g", step=10.0,
+                            help="기본값은 FAST SF L 차세대 셸 557 g")
+            st.number_input("목표 임계 높이 h50 [m]", H_MIN, H_MAX, key="target_h_m", step=0.1,
+                            help="이 높이에서 깨지지 않아야 한다고 보는 값")
+
         with st.expander("설정 저장·불러오기"):
             cfg_json = json.dumps({k: ss[k] for k in DEFAULTS if k in ss}, ensure_ascii=False, indent=2)
             st.download_button("설정 내려받기 (JSON)", cfg_json.encode("utf-8"),
@@ -460,7 +506,10 @@ def tab_impact(s):
     verdict = "파손" if ref.fail else "유지"
     if main.fail is not None:
         verdict = f"{verdict} / 주판정 {'파손' if main.fail else '유지'}"
-    cols[5].metric("판정", verdict, f"여유율 {ref.margin:.2f}")
+    cuts = current_cuts()
+    g_margin = grade(ref.margin, margin_scale(cuts))
+    cols[5].metric("판정", f"{verdict} · {g_margin.letter}", f"여유율 {ref.margin:.2f}")
+    st.caption(f"등급 {g_margin.letter} — {g_margin.meaning} ({g_margin.anchor_text}; {cuts_note(cuts)})")
     st.caption(f"참고 판정: 굽힘응력 {case.sigma_local/1e6:.0f} MPa vs 굽힘강도 {ref.strength/1e6:.0f} MPa "
                f"[문헌값] · 주 판정: {q_text(main.Ec, unit='J')} · {IMPULSE_NOTE}")
 
@@ -716,6 +765,22 @@ def tab_helmet(s):
     m2.metric("필요 스트로크", f"{r.stroke*1e3:.1f} mm", f"라이너 {tl_mm:.0f} mm")
     m3.metric("펄스 길이(압축)", f"{r.pulse_duration*1e3:.2f} ms")
     m4.metric("s_min = v²/2a", f"{r.s_min*1e3:.2f} mm", "검산용 이상 한계")
+    cuts = current_cuts()
+    g_acc = grade(r.a_max_g, blunt_g_scale(BLUNT_G_LIMIT, cuts))
+    g_stroke = grade(r.stroke, bottoming_scale(
+        computed(liner.usable_stroke, "m", "사용 가능 스트로크"), cuts))
+    gcols = st.columns(3)
+    show_grade(gcols[0], "가속도 등급", g_acc)
+    show_grade(gcols[1], "스트로크 등급", g_stroke)
+    if area.known and rho.known:
+        g_mass_h = grade(shell_mass(rho.value, area, units.mm_to_m(t_mm), r_ov).value,
+                         shell_mass_scale(assumed(units.g_to_kg(
+                             st.session_state.get("target_mass_g", 557.0)), "kg", "목표(사용자)"), cuts))
+        show_grade(gcols[2], "셸 무게 등급", g_mass_h)
+    else:
+        gcols[2].caption("셸 무게 등급: 표면적 A 미입력")
+    st.caption(cuts_note(cuts))
+
     lo_a, hi_a = required_spread_area(mass, liner)
     st.caption(f"설계 창 [계산값]: 바닥침을 피하려면 A_spread ≥ {units.m2_to_cm2(lo_a.value):.0f} cm², "
                f"150 g 이하를 지키려면 A_spread ≤ {units.m2_to_cm2(hi_a.value):.0f} cm²")
@@ -735,6 +800,9 @@ def tab_helmet(s):
     tol = c3.slider("허용 피크 오차", 0.01, 0.3, 0.05, 0.01)
     mc = measurement_check(r.pulse_duration, n_channels=int(nch),
                            sensor_bandwidth=bw or None, tolerance=tol)
+    g_meas = grade(mc.total_error, measurement_scale(
+        assumed(tol, "-", "사용자 허용오차"), current_cuts()))
+    st.markdown(f"**측정 등급: {g_meas.letter}** — {g_meas.meaning} ({g_meas.anchor_text})")
     st.write(f"- 펄스당 샘플 {mc.samples_per_pulse:.1f}개 · 샘플링 피크 오차 {mc.sampling_error*100:.1f} % "
              + (f"· 대역 감쇠 {mc.bandwidth_error*100:.1f} %" if mc.bandwidth_error is not None else "")
              + f" · 합계 {mc.total_error*100:.1f} % → {'측정 가능' if mc.ok else '측정 불가, 장비 변경 필요'}")
@@ -784,8 +852,23 @@ def tab_materials(s):
            "면밀도(가벼운 순)": "areal_density", "판 강성": "k_bending"}[sort_by]
     rows = rank(rows, key)
 
+    cuts = current_cuts()
+    target_mass = assumed(units.g_to_kg(st.session_state.get("target_mass_g", 557.0)), "kg",
+                          "목표 셸 무게(사용자)")
+    target_h = assumed(st.session_state.get("target_h_m", 2.0), "m", "목표 임계 높이(사용자)")
+    g_margin = [grade(r.margin, margin_scale(cuts)) for r in rows]
+    g_ad = [grade(r.areal_density, areal_density_scale(FASTSF_AREAL_DENSITY, cuts)) for r in rows]
+    g_mass = [grade(r.shell_mass, shell_mass_scale(target_mass, cuts)) for r in rows]
+    g_h50 = [grade(r.h50, h50_scale(target_h, cuts)) for r in rows]
+    g_k = relative_grades([r.k_bending for r in rows], "high", "판 강성")
+    # 미확인 물성이 많은 재료가 종합에서 유리해지지 않도록 4개 중 3개는 채점돼야 한다
+    g_all = [overall([g_margin[i], g_ad[i], g_mass[i], g_h50[i]], min_known=3)
+             for i in range(len(rows))]
+
     df = pd.DataFrame([{
         "재료": r.name, "분류": "출력 가능" if r.printable else "비교용(복합재)",
+        "종합": g_all[i].letter, "여유율 등급": g_margin[i].letter, "면밀도 등급": g_ad[i].letter,
+        "무게 등급": g_mass[i].letter, "h50 등급": g_h50[i].letter, "강성 등급(상대)": g_k[i].letter,
         "두께 [mm]": units.m_to_mm(r.thickness),
         "면밀도 [g/cm²]": units.kg_m2_to_g_cm2(r.areal_density) if r.areal_density else None,
         "셸 무게 [g]": units.kg_to_g(r.shell_mass) if r.shell_mass else None,
@@ -794,8 +877,15 @@ def tab_materials(s):
         "굽힘강도 [MPa]": r.strength / 1e6 if r.strength else None,
         "여유율": r.margin, "흡수 에너지 [J]": r.E_abs,
         "h50 [m]": r.h50, "판정": ("-" if r.margin is None else ("유지" if r.margin >= 1 else "파손")),
-    } for r in rows])
+    } for i, r in enumerate(rows)])
     st.dataframe(df.round(3), width="stretch", hide_index=True)
+    st.caption(
+        "등급 기준 — 여유율: 응력 = 굽힘강도인 물리적 경계 [계산값] · "
+        f"면밀도: FAST SF {units.kg_m2_to_g_cm2(FASTSF_AREAL_DENSITY.value)*1e4:.0f} g/m² [문헌값] · "
+        f"무게: 목표 {st.session_state.get('target_mass_g', 557.0):.0f} g [가정] · "
+        f"h50: 목표 {st.session_state.get('target_h_m', 2.0):.2f} m [가정] · "
+        f"강성: 비교 대상 안 순위(절대 기준 없음). {cuts_note(cuts)}")
+    st.caption("A " + " · ".join(f"{k} {v}" for k, v in GRADE_MEANING.items()).replace("A 기준", "기준"))
     download_df(df, "material_comparison.csv", "dl_materials")
 
     plot_key = {"여유율": "여유율", "무게 대비 여유율": "여유율", "면밀도(가벼운 순)": "면밀도 [g/cm²]",
