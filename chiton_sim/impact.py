@@ -105,8 +105,9 @@ def _time_scales(m1: float, law: ThorntonLaw, v: float, Kb: float | None, m2: fl
     return h, ts, step
 
 
-def _run_2dof(m1, m2, Kb, law, v_in, n_seg, rtol=1e-10, step_div=300):
+def _run_2dof(m1, m2, plate, law, v_in, n_seg, rtol=1e-10, step_div=300):
     c = _Contact(law)
+    Kb = plate.k_bending()
     h, ts, max_step = _time_scales(m1, law, v_in, Kb, m2, step_div)
     t_end = 12.0 * ts
     omega = math.sqrt(Kb / m2)
@@ -114,7 +115,7 @@ def _run_2dof(m1, m2, Kb, law, v_in, n_seg, rtol=1e-10, step_div=300):
     def rhs_for(mode):
         def rhs(_t, y):
             F = c.force(mode, y[0] - y[2])
-            return [y[1], -F / m1, y[3], (F - Kb * y[2]) / m2, F]
+            return [y[1], -F / m1, y[3], (F - plate.force(y[2])) / m2, F]
         return rhs
 
     y = np.array([0.0, v_in, 0.0, 0.0, 0.0])
@@ -172,24 +173,25 @@ def _run_2dof(m1, m2, Kb, law, v_in, n_seg, rtol=1e-10, step_div=300):
     return c, h, ts_out, ys_out, modes_out, contacts, y, ended_in_contact
 
 
-def _solve_w(c: _Contact, mode: str, x1: float, Kb: float | None) -> float:
-    """SDOF/강체 지지: 판 처짐 w (K_b w = F_c(x1 − w))."""
-    if Kb is None:
+def _solve_w(c: _Contact, mode: str, x1: float, plate) -> float:
+    """SDOF/강체 지지: 판 처짐 w (K_b w + K_m w³ = F_c(x1 − w))."""
+    if plate is None:
         return 0.0
     if c.force(mode, x1) <= 0.0:
         return 0.0
-    g = lambda w: Kb * w - c.force(mode, x1 - w)
+    g = lambda w: plate.force(w) - c.force(mode, x1 - w)
     return brentq(g, 0.0, x1, xtol=1e-16, rtol=1e-13)
 
 
-def _run_1dof(m1, Kb, law, v_in, n_seg, rtol=1e-10, step_div=300):
+def _run_1dof(m1, plate, law, v_in, n_seg, rtol=1e-10, step_div=300):
     c = _Contact(law)
+    Kb = plate.k_bending() if plate is not None else None
     h, ts, max_step = _time_scales(m1, law, v_in, Kb, None, step_div)
     t_end = 12.0 * ts
 
     def rhs_for(mode):
         def rhs(_t, y):
-            w = _solve_w(c, mode, y[0], Kb)
+            w = _solve_w(c, mode, y[0], plate)
             F = c.force(mode, y[0] - w)
             return [y[1], -F / m1, F]
         return rhs
@@ -224,7 +226,7 @@ def _run_1dof(m1, Kb, law, v_in, n_seg, rtol=1e-10, step_div=300):
             break
         if mode == "load":
             x1_turn = y[0]
-            w = _solve_w(c, "load", y[0], Kb)
+            w = _solve_w(c, "load", y[0], plate)
             c.turn(y[0] - w)
             mode = "unload"
         elif hit[0] == 0:
@@ -266,7 +268,7 @@ def simulate_impact(
 
     if mode == "2dof":
         c, href, ts_out, ys_out, modes_out, contacts, y_end, open_ = _run_2dof(
-            m1, m2, Kb, law, v_in, n_per_segment, rtol, step_div)
+            m1, m2, plate, law, v_in, n_per_segment, rtol, step_div)
         t = np.concatenate(ts_out)
         Y = np.concatenate(ys_out, axis=1)
         x1, v1, x2, v2, Jst = Y
@@ -276,15 +278,15 @@ def simulate_impact(
         F = np.array([c.force(md, d) for md, d in zip(mode_arr, delta)])
         v_out = float(y_end[1])
         J = float(y_end[4])
-        E_plate = 0.5 * m2 * y_end[3] ** 2 + 0.5 * Kb * y_end[2] ** 2
+        E_plate = 0.5 * m2 * y_end[3] ** 2 + plate.energy(y_end[2])
     else:
         c, href, ts_out, ys_out, modes_out, contacts, y_end, open_ = _run_1dof(
-            m1, Kb, law, v_in, n_per_segment, rtol, step_div)
+            m1, plate if mode == "sdof" else None, law, v_in, n_per_segment, rtol, step_div)
         t = np.concatenate(ts_out)
         Y = np.concatenate(ys_out, axis=1)
         x1, v1, Jst = Y
         mode_arr = np.concatenate([[m] * n for m, n in modes_out])
-        w = np.array([_solve_w(c, md, xx, Kb) for md, xx in zip(mode_arr, x1)])
+        w = np.array([_solve_w(c, md, xx, plate if mode == "sdof" else None) for md, xx in zip(mode_arr, x1)])
         delta = x1 - w
         F = np.array([c.force(md, d) for md, d in zip(mode_arr, delta)])
         v_out = float(y_end[1])
@@ -318,7 +320,10 @@ def simulate_impact(
             log.add("mass_ratio_mid", Severity.INFO,
                     f"구슬/판 질량비 {mass_ratio:.2f}: 중간 영역 — 판 관성을 무시할 수 없어 2자유도 결과를 쓴다 (Shivakumar 1985)")
         wt = w_max / plate.t
-        if wt > W_OVER_T_WARN:
+        if plate.k_membrane > 0:
+            log.add("membrane_on", Severity.INFO,
+                    f"처짐 w/t = {wt:.2f} — 막(membrane) 강성을 포함해 계산했다")
+        elif wt > W_OVER_T_WARN:
             log.add("membrane", Severity.WARNING, f"처짐 w/t = {wt:.2f} > 0.5: 막(membrane) 효과가 누락된다")
         elif wt > W_OVER_T_INFO:
             log.add("membrane_info", Severity.INFO,
@@ -330,7 +335,8 @@ def simulate_impact(
 
     return ImpactResult(
         mode=mode, v_in=v_in, v_out=v_out, e=e,
-        F_max=float(np.max(F)), F_plate_max=(Kb * w_max if Kb else float(np.max(F))),
+        F_max=float(np.max(F)),
+        F_plate_max=(plate.force(w_max) if (plate is not None and mode != "rigid") else float(np.max(F))),
         w_max=w_max, delta_max=c.dmax, dent=c.dp, contact_radius=law.contact_radius(c.dmax),
         tc=tc, n_contacts=len(contacts), J=J, J_expected=J_exp,
         J_rel_err=abs(J - J_exp) / J_exp, avg_force=J / tc if tc > 0 else math.nan,

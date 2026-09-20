@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,12 +17,14 @@ import streamlit as st
 from chiton_sim import units
 from chiton_sim.ball import Ball, GuideTube, STANDARD_BALL_INCHES
 from chiton_sim.calibration import (
-    CRITERIA_SUGGESTIONS, FailureCriteria, RigSetup, fold_trend, load_criteria, run_calibration,
-    save_criteria, validate_schema,
+    CRITERIA_SUGGESTIONS, FailureCriteria, RigSetup, fit_plate_stiffness, fold_trend,
+    load_criteria, run_calibration, save_criteria, validate_schema,
 )
-from chiton_sim.contact import SRC_THORNTON, SRC_YIELD_16
+from chiton_sim.contact import SRC_THORNTON, SRC_YIELD_16, effective_modulus
 from chiton_sim.fall import H_MAX, H_MIN, FallParams, simulate_fall
-from chiton_sim.failure import failure_probability_curve, main_judgment, reference_judgment
+from chiton_sim.failure import (
+    energy_balance, failure_probability_curve, main_judgment, reference_judgment,
+)
 from chiton_sim.helmet import (
     BLUNT_G_LIMIT, BLUNT_VELOCITY, FASTSF_AREAL_DENSITY, FASTSF_SHELL_L_DATASHEET,
     FASTSF_SHELL_L_NEXTGEN, FASTSF_SIZES, FASTSF_XXL_NOTE, FMVSS218_HEADFORMS, LinerModel,
@@ -32,6 +35,7 @@ from chiton_sim.impact import IMPULSE_NOTE
 from chiton_sim.materials import (
     BAMBU_PLA_BASIC, EPP_ARPRO_TABLE, EPP_NOTE, epp_stress, user_filament,
 )
+from chiton_sim.plate import plate_from_material, reference_stress
 from chiton_sim.planner import (
     curvature_check, equal_energy_pair, specimen_plan, staircase_progress, velocity_effect_test,
 )
@@ -98,143 +102,253 @@ PLOT_CONFIG = {"displaylogo": False, "toImageButtonOptions": {"format": "png", "
 
 
 # ---------------------------------------------------------------------------
-# 사이드바 입력
+# 사이드바 입력 — 자주 만지는 것은 위에, 나머지는 접어 둔다
 # ---------------------------------------------------------------------------
+DEFAULTS = {
+    "height": 2.0, "how": "직접 (m)", "n_floors": 5.0, "floor_h": 2.8, "start_h": 1.0,
+    "ball_pick": '3/4"', "ball_g": 28.27,
+    "use_tube": True, "tube_mode": "직접 입력", "tube_len": 1.8, "tube_id": 22.0, "tube_clr": 1.0,
+    "cfg_type": "monolithic", "t_mm": 3.0, "a_mm": 40.0, "bc": "clamped", "orient": "XY",
+    "infill": 100, "annealed": True, "n_seg": 3, "lock": True, "joint": "print_in_place",
+    "ovl_mm": 5.0, "seam_mm": 120.0, "site": "center", "mat_choice": "Bambu PLA Basic (TDS)",
+    "membrane_mode": "자동 (w/t > 0.2면 포함)", "py_ratio": 1.6,
+    "fst": "(없음)", "fn": 4, "fd": 4.0, "fp": 20.0, "fe": 8.0,
+    "use_lim": False, "pd_min": 4.0, "ed_min": 3.0,
+    "vt": "(없음)", "vn": 6, "vd": 8.0,
+}
+PRESETS = {
+    "낙하탑 1.5 m": {"height": 1.5, "use_tube": True, "tube_mode": "직접 입력", "tube_len": 1.5,
+                  "tube_id": 22.0, "ball_pick": '3/4"'},
+    "낙하탑 2 m": {"height": 2.0, "use_tube": True, "tube_mode": "직접 입력", "tube_len": 1.8,
+                 "tube_id": 22.0, "ball_pick": '3/4"'},
+    "PET병 관 1.8 m": {"height": 1.8, "use_tube": True, "tube_mode": "500 mL PET병",
+                     "tube_len": 1.8, "ball_pick": '3/4"'},
+    "5층 낙하 13 m": {"height": 13.0, "use_tube": False, "ball_pick": '5/8"'},
+}
+
+
+def init_state() -> None:
+    for k, v in DEFAULTS.items():
+        st.session_state.setdefault(k, v)
+
+
+def apply_settings(d: dict) -> None:
+    for k, v in d.items():
+        if k in DEFAULTS:
+            st.session_state[k] = v
+
+
 def sidebar():
+    init_state()
     s = {}
-    st.sidebar.header("낙하 조건")
-    mode = st.sidebar.radio("모드", ["가이드관 낙하탑 (1.5–2 m)", "5층 낙하 (12–15 m)"], index=0)
-    how = st.sidebar.radio("높이 입력", ["직접 (m)", "층수 × 층고 + 시작 높이"], index=0, horizontal=True)
-    if how == "직접 (m)":
-        default = 2.0 if mode.startswith("가이드관") else 13.0
-        h = st.sidebar.number_input("낙하 높이 [m]", H_MIN, H_MAX, default, 0.05)
-    else:
-        n = st.sidebar.number_input("층수", 0.0, 8.0, 5.0, 1.0)
-        fh = st.sidebar.number_input("층고 [m]", 1.0, 6.0, 2.8, 0.1)
-        h0 = st.sidebar.number_input("시작 높이 [m]", 0.0, 5.0, 1.0, 0.1)
-        h = units.height_from_floors(n, fh, h0)
-        st.sidebar.caption(f"= {h:.2f} m")
-    s["height"] = float(h)
+    ss = st.session_state
 
-    st.sidebar.header("구슬")
-    pick = st.sidebar.selectbox("규격 강구 스냅", ["(질량 직접 입력)"] + list(STANDARD_BALL_INCHES))
-    if pick == "(질량 직접 입력)":
-        g = st.sidebar.number_input("질량 [g]", 0.5, 2000.0, 28.27, 0.01)
-        ball = Ball.from_mass(units.g_to_kg(g))
-    else:
-        ball = Ball.standard(pick)
-    st.sidebar.caption(f"질량 {units.kg_to_g(ball.mass):.2f} g · 지름 {units.m_to_mm(ball.diameter):.3f} mm "
-                       f"(크롬강 7.81 g/cm³ [문헌값])")
-    s["ball"] = ball
+    with st.sidebar:
+        st.markdown("**빠른 설정**")
+        cols = st.columns(2)
+        for i, (name, preset) in enumerate(PRESETS.items()):
+            if cols[i % 2].button(name, width="stretch", key=f"preset_{i}"):
+                apply_settings(preset)
+                st.rerun()
 
-    st.sidebar.header("가이드관")
-    use_tube = st.sidebar.checkbox("가이드관 사용", value=True)
-    tube = None
-    if use_tube:
-        tmode = st.sidebar.radio("관 종류", ["직접 입력", "500 mL PET병"], horizontal=True)
-        length = st.sidebar.number_input("관 길이 [m]", 0.1, 20.0, min(1.8, s["height"]), 0.1)
-        if tmode == "직접 입력":
-            idmm = st.sidebar.number_input("최소 내경 [mm]", 5.0, 200.0, 22.0, 0.5)
-            clr = st.sidebar.number_input("여유 [mm]", 0.0, 10.0, 1.0, 0.1)
-            tube = GuideTube(assumed(units.mm_to_m(idmm), "m", "사용자 입력 내경"), length,
-                             assumed(units.mm_to_m(clr), "m", "사용자 입력 여유"))
+        st.markdown("### 기본")
+        st.radio("높이 입력", ["직접 (m)", "층수 × 층고 + 시작 높이"], key="how", horizontal=True)
+        if ss["how"] == "직접 (m)":
+            st.number_input("낙하 높이 [m]", H_MIN, H_MAX, key="height", step=0.05)
+            h = float(ss["height"])
         else:
-            tube = GuideTube.pet_bottle(length)
-    s["tube"] = tube
+            c1, c2, c3 = st.columns(3)
+            c1.number_input("층수", 0.0, 8.0, key="n_floors", step=1.0)
+            c2.number_input("층고 [m]", 1.0, 6.0, key="floor_h", step=0.1)
+            c3.number_input("시작 [m]", 0.0, 5.0, key="start_h", step=0.1)
+            h = units.height_from_floors(ss["n_floors"], ss["floor_h"], ss["start_h"])
+            st.caption(f"= {h:.2f} m")
+        s["height"] = float(h)
 
-    st.sidebar.header("시편 구성")
-    cfg_type = st.sidebar.selectbox("config_type", CONFIG_TYPES)
-    t_mm = st.sidebar.number_input("두께 [mm]", 0.4, 20.0, 3.0, 0.1)
-    a_mm = st.sidebar.number_input("고정 링 내반경 [mm]", 5.0, 200.0, 40.0, 1.0)
-    bc = st.sidebar.selectbox("경계조건", ["clamped", "simply_supported"],
-                              format_func=lambda x: "고정단" if x == "clamped" else "단순지지")
-    orient = st.sidebar.selectbox("출력 방향", ["XY", "Z"])
-    infill = st.sidebar.slider("인필 [%]", 10, 100, 100, 5)
-    annealed = st.sidebar.checkbox("어닐링함 (55 °C·8 h)", value=True)
-    ovl_mm = n_seg = 0.0
-    lock = False
-    joint = None
-    seam_mm = None
-    if cfg_type != "monolithic":
-        n_seg = st.sidebar.number_input("분할 판 수", 2, 24, 3, 1)
-        lock = st.sidebar.checkbox("잠금(lock)", value=True)
-        joint = st.sidebar.selectbox("joint_type", JOINT_TYPES)
-        if cfg_type == "segmented_overlap":
-            ovl_mm = st.sidebar.number_input("겹침 폭 [mm]", 0.0, 50.0, 5.0, 0.5)
-            sl = st.sidebar.number_input("이음선 총 길이 [mm] (CAD, 0=미입력)", 0.0, 2000.0, 120.0, 5.0)
-            seam_mm = sl if sl > 0 else None
+        st.selectbox("구슬 (규격 강구)", ["(질량 직접 입력)"] + list(STANDARD_BALL_INCHES), key="ball_pick")
+        if ss["ball_pick"] == "(질량 직접 입력)":
+            st.number_input("질량 [g]", 0.5, 2000.0, key="ball_g", step=0.01)
+            ball = Ball.from_mass(units.g_to_kg(ss["ball_g"]))
+        else:
+            ball = Ball.standard(ss["ball_pick"])
+        s["ball"] = ball
+        st.caption(f"{units.kg_to_g(ball.mass):.2f} g · 지름 {units.m_to_mm(ball.diameter):.2f} mm · 크롬강 [문헌값]")
 
-    st.sidebar.header("군부의 눈 요소")
-    fst = st.sidebar.selectbox("fastener_type", ["(없음)"] + list(FASTENER_TYPES))
-    fastener = None
-    if fst != "(없음)":
-        c1, c2 = st.sidebar.columns(2)
-        fn = c1.number_input("개수", 1, 20, 4, 1)
-        fd = c2.number_input("구멍 지름 [mm]", 1.0, 20.0, 4.0, 0.5)
-        fp = c1.number_input("피치 [mm]", 2.0, 200.0, 20.0, 1.0)
-        fe = c2.number_input("모서리 거리 [mm]", 1.0, 100.0, 8.0, 0.5)
-        use_lim = st.sidebar.checkbox("p/d·e/d 기준값 직접 입력 (문헌 기준 미확인)")
-        pd_min = assumed(st.sidebar.number_input("p/d 최소", 1.0, 10.0, 4.0, 0.1), "-", "사용자 입력") if use_lim else None
-        ed_min = assumed(st.sidebar.number_input("e/d 최소", 1.0, 10.0, 3.0, 0.1), "-", "사용자 입력") if use_lim else None
-        kw = {}
-        if pd_min is not None:
-            kw = {"p_d_min": pd_min, "e_d_min": ed_min}
-        fastener = FastenerSpec(fst, int(fn), units.mm_to_m(fd), units.mm_to_m(fp), units.mm_to_m(fe), **kw)
-    vt = st.sidebar.selectbox("vent_type", ["(없음)"] + list(VENT_TYPES))
-    vent = None
-    if vt != "(없음)":
-        c1, c2 = st.sidebar.columns(2)
-        vn = c1.number_input("통기구 개수", 1, 40, 6, 1)
-        vd = c2.number_input("통기구 지름 [mm]", 1.0, 40.0, 8.0, 0.5)
-        vent = VentSpec(vt, int(vn), units.mm_to_m(vd))
+        c1, c2 = st.columns(2)
+        c1.number_input("판 두께 [mm]", 0.4, 20.0, key="t_mm", step=0.1)
+        c2.number_input("링 내반경 [mm]", 5.0, 200.0, key="a_mm", step=1.0)
+        st.selectbox("시편 구성", CONFIG_TYPES, key="cfg_type")
+        st.selectbox("타격 위치", IMPACT_SITES, key="site")
 
+        with st.expander("분할 설정", expanded=ss["cfg_type"] != "monolithic"):
+            if ss["cfg_type"] == "monolithic":
+                st.caption("일체형이라 분할 설정이 필요 없다.")
+            else:
+                c1, c2 = st.columns(2)
+                c1.number_input("분할 판 수", 2, 24, key="n_seg", step=1)
+                c2.checkbox("잠금(lock)", key="lock")
+                st.selectbox("joint_type", JOINT_TYPES, key="joint")
+                if ss["cfg_type"] == "segmented_overlap":
+                    c1, c2 = st.columns(2)
+                    c1.number_input("겹침 폭 [mm]", 0.0, 50.0, key="ovl_mm", step=0.5)
+                    c2.number_input("이음선 길이 [mm]", 0.0, 2000.0, key="seam_mm", step=5.0,
+                                    help="CAD 실측값. 0이면 면밀도를 '미확인'으로 둔다")
+
+        with st.expander("가이드관"):
+            st.checkbox("가이드관 사용", key="use_tube")
+            tube = None
+            if ss["use_tube"]:
+                st.radio("관 종류", ["직접 입력", "500 mL PET병"], key="tube_mode", horizontal=True)
+                st.number_input("관 길이 [m]", 0.1, 20.0, key="tube_len", step=0.1)
+                if ss["tube_mode"] == "직접 입력":
+                    c1, c2 = st.columns(2)
+                    c1.number_input("내경 [mm]", 5.0, 200.0, key="tube_id", step=0.5)
+                    c2.number_input("여유 [mm]", 0.0, 10.0, key="tube_clr", step=0.1)
+                    tube = GuideTube(assumed(units.mm_to_m(ss["tube_id"]), "m", "사용자 입력 내경"),
+                                     ss["tube_len"],
+                                     assumed(units.mm_to_m(ss["tube_clr"]), "m", "사용자 입력 여유"))
+                else:
+                    tube = GuideTube.pet_bottle(ss["tube_len"])
+            s["tube"] = tube
+
+        with st.expander("출력 조건·재료"):
+            c1, c2 = st.columns(2)
+            c1.selectbox("출력 방향", ["XY", "Z"], key="orient")
+            c2.selectbox("경계조건", ["clamped", "simply_supported"], key="bc",
+                         format_func=lambda x: "고정단" if x == "clamped" else "단순지지")
+            st.slider("인필 [%]", 10, 100, key="infill", step=5)
+            st.checkbox("어닐링함 (55 °C·8 h)", key="annealed")
+            st.radio("재료", ["Bambu PLA Basic (TDS)", "사용자 TDS 입력"], key="mat_choice")
+            if ss["mat_choice"].startswith("Bambu"):
+                material = BAMBU_PLA_BASIC
+            else:
+                name = st.text_input("이름", "PETG (사용자)", key="u_name")
+                src = st.text_input("출처 URL (없으면 '미확인')", "", key="u_src")
+                c1, c2 = st.columns(2)
+                rho = c1.number_input("밀도 [g/cm³]", 0.5, 3.0, 1.27, 0.01, key="u_rho")
+                nu = c2.number_input("푸아송비 (가정)", 0.1, 0.49, 0.38, 0.01, key="u_nu")
+                fm = c1.number_input("굽힘탄성률 XY [MPa]", 100.0, 10000.0, 1500.0, 10.0, key="u_fm")
+                fs = c2.number_input("굽힘강도 XY [MPa]", 5.0, 300.0, 60.0, 1.0, key="u_fs")
+                fmz = c1.number_input("굽힘탄성률 Z [MPa]", 100.0, 10000.0, 1300.0, 10.0, key="u_fmz")
+                fsz = c2.number_input("굽힘강도 Z [MPa]", 5.0, 300.0, 40.0, 1.0, key="u_fsz")
+                material = user_filament(
+                    name, src or None, rho * 1e3, nu,
+                    {"flex_modulus": fm * 1e6, "flex_strength": fs * 1e6, "tensile_strength": None,
+                     "youngs_modulus": None, "elongation": None, "impact_unnotched": None},
+                    {"flex_modulus": fmz * 1e6, "flex_strength": fsz * 1e6, "tensile_strength": None,
+                     "youngs_modulus": None, "elongation": None, "impact_unnotched": None})
+            s["material"] = material
+
+        with st.expander("군부의 눈 요소 (체결부·통기구)"):
+            st.selectbox("fastener_type", ["(없음)"] + list(FASTENER_TYPES), key="fst")
+            fastener = None
+            if ss["fst"] != "(없음)":
+                c1, c2 = st.columns(2)
+                c1.number_input("개수", 1, 20, key="fn", step=1)
+                c2.number_input("구멍 지름 [mm]", 1.0, 20.0, key="fd", step=0.5)
+                c1.number_input("피치 [mm]", 2.0, 200.0, key="fp", step=1.0)
+                c2.number_input("모서리 거리 [mm]", 1.0, 100.0, key="fe", step=0.5)
+                st.checkbox("p/d·e/d 기준값 직접 입력 (문헌 기준 미확인)", key="use_lim")
+                kw = {}
+                if ss["use_lim"]:
+                    c1, c2 = st.columns(2)
+                    c1.number_input("p/d 최소", 1.0, 10.0, key="pd_min", step=0.1)
+                    c2.number_input("e/d 최소", 1.0, 10.0, key="ed_min", step=0.1)
+                    kw = {"p_d_min": assumed(ss["pd_min"], "-", "사용자 입력"),
+                          "e_d_min": assumed(ss["ed_min"], "-", "사용자 입력")}
+                fastener = FastenerSpec(ss["fst"], int(ss["fn"]), units.mm_to_m(ss["fd"]),
+                                        units.mm_to_m(ss["fp"]), units.mm_to_m(ss["fe"]), **kw)
+            st.selectbox("vent_type", ["(없음)"] + list(VENT_TYPES), key="vt")
+            vent = None
+            if ss["vt"] != "(없음)":
+                c1, c2 = st.columns(2)
+                c1.number_input("통기구 개수", 1, 40, key="vn", step=1)
+                c2.number_input("통기구 지름 [mm]", 1.0, 40.0, key="vd", step=0.5)
+                vent = VentSpec(ss["vt"], int(ss["vn"]), units.mm_to_m(ss["vd"]))
+
+        with st.expander("모델 옵션 (오차 줄이기)"):
+            kfit = st.session_state.get("k_fit")
+            st.markdown("**판 강성 실측** — 가장 큰 불확실성(경계조건 가정)을 없앤다")
+            if kfit is not None:
+                st.success(f"실측 K_b = {kfit.kb.value/1e3:.1f} kN/m"
+                           + (f", K_m = {kfit.km.value/1e9:.2f} GN/m³" if kfit.km else "")
+                           + f" · R² = {kfit.r2:.4f} · n = {kfit.n} [보정 후]")
+                if st.button("실측 강성 지우기", key="clear_kfit"):
+                    st.session_state.pop("k_fit")
+                    st.rerun()
+            else:
+                st.caption("'보정' 탭의 '판 강성 실측'에서 하중-처짐을 입력하면 여기에 반영된다.")
+            st.markdown("**막(membrane) 효과** — 처짐이 두께의 0.2배를 넘으면 무시할 수 없다")
+            st.radio("막 강성", ["자동 (w/t > 0.2면 포함)", "항상 포함", "제외"],
+                     key="membrane_mode", label_visibility="collapsed")
+            st.markdown("**p_y / Y 비율** — 압흔 실측으로 보정하기 전 가정값 (문헌 범위 1.6–3.0)")
+            st.slider("p_y / Y", 1.6, 3.0, key="py_ratio", step=0.1, label_visibility="collapsed")
+
+        with st.expander("설정 저장·불러오기"):
+            cfg_json = json.dumps({k: ss[k] for k in DEFAULTS if k in ss}, ensure_ascii=False, indent=2)
+            st.download_button("설정 내려받기 (JSON)", cfg_json.encode("utf-8"),
+                               file_name="sim_settings.json", mime="application/json",
+                               width="stretch")
+            up = st.file_uploader("설정 파일 올리기", type=["json"], key="settings_up")
+            if up is not None and st.button("이 설정 적용", key="apply_settings"):
+                try:
+                    apply_settings(json.loads(up.read().decode("utf-8")))
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"설정을 읽지 못했다: {exc}")
+            if st.button("기본값으로 되돌리기", key="reset_settings"):
+                apply_settings(DEFAULTS)
+                st.rerun()
+
+        rep = st.session_state.get("report")
+        s["use_calib"] = st.checkbox("보정 결과 사용", value=bool(rep), disabled=not rep,
+                                     key=f"use_calib_{bool(rep)}")
+        if rep and s["use_calib"] and rep.tube and rep.py:
+            st.caption(f"η = {rep.tube.eta.value:.4f} · p_y = {rep.py.py.value/1e6:.0f} MPa [보정 후]")
+
+    kfit = st.session_state.get("k_fit")
+    seg = ss["cfg_type"] != "monolithic"
+    t_m = units.mm_to_m(ss["t_mm"])
+    s["py_ratio"] = float(ss["py_ratio"])
+    membrane = ss["membrane_mode"] == "항상 포함"
+    if ss["membrane_mode"].startswith("자동"):
+        membrane = _auto_membrane(s, t_m, ss)
+    s["membrane"] = membrane
     s["cfg"] = SpecimenConfig(
-        config_type=cfg_type, thickness=units.mm_to_m(t_mm), ring_radius=units.mm_to_m(a_mm),
-        orientation=orient, infill=infill / 100.0, annealed=annealed, bc=bc,
-        overlap=units.mm_to_m(ovl_mm), n_segments=int(n_seg) if cfg_type != "monolithic" else 1,
-        lock=lock, joint_type=joint,
-        seam_length=units.mm_to_m(seam_mm) if seam_mm else None,
-        fastener=fastener, vent=vent,
+        config_type=ss["cfg_type"], thickness=t_m, ring_radius=units.mm_to_m(ss["a_mm"]),
+        orientation=ss["orient"], infill=ss["infill"] / 100.0, annealed=ss["annealed"], bc=ss["bc"],
+        overlap=units.mm_to_m(ss["ovl_mm"]) if seg else 0.0,
+        n_segments=int(ss["n_seg"]) if seg else 1, lock=ss["lock"] if seg else False,
+        joint_type=ss["joint"] if seg else None,
+        seam_length=units.mm_to_m(ss["seam_mm"]) if (seg and ss["seam_mm"] > 0) else None,
+        fastener=fastener, vent=vent, membrane=membrane,
+        k_measured=(kfit.kb.value if kfit else None),
+        km_measured=(kfit.km.value if (kfit and kfit.km) else None),
     )
-    s["site"] = st.sidebar.selectbox("타격 위치 (impact_site)", IMPACT_SITES)
-
-    st.sidebar.header("재료")
-    mat_choice = st.sidebar.radio("재료", ["Bambu PLA Basic (TDS)", "사용자 TDS 입력"], index=0)
-    if mat_choice.startswith("Bambu"):
-        material = BAMBU_PLA_BASIC
-    else:
-        with st.sidebar.expander("사용자 TDS", expanded=True):
-            name = st.text_input("이름", "PETG (사용자)")
-            src = st.text_input("출처 URL (없으면 '미확인'으로 표시)", "")
-            rho = st.number_input("밀도 [g/cm³]", 0.5, 3.0, 1.27, 0.01)
-            nu = st.number_input("푸아송비 (가정)", 0.1, 0.49, 0.38, 0.01)
-            fm = st.number_input("굽힘탄성률 XY [MPa]", 100.0, 10000.0, 1500.0, 10.0)
-            fs = st.number_input("굽힘강도 XY [MPa]", 5.0, 300.0, 60.0, 1.0)
-            fmz = st.number_input("굽힘탄성률 Z [MPa]", 100.0, 10000.0, 1300.0, 10.0)
-            fsz = st.number_input("굽힘강도 Z [MPa]", 5.0, 300.0, 40.0, 1.0)
-        material = user_filament(
-            name, src or None, rho * 1e3, nu,
-            {"flex_modulus": fm * 1e6, "flex_strength": fs * 1e6, "tensile_strength": None,
-             "youngs_modulus": None, "elongation": None, "impact_unnotched": None},
-            {"flex_modulus": fmz * 1e6, "flex_strength": fsz * 1e6, "tensile_strength": None,
-             "youngs_modulus": None, "elongation": None, "impact_unnotched": None},
-        )
-    s["material"] = material
-
-    st.sidebar.header("보정")
-    rep = st.session_state.get("report")
-    # 보정 결과가 새로 생기면 키가 바뀌어 기본값(True)으로 다시 그려진다
-    s["use_calib"] = st.sidebar.checkbox("보정 결과 사용", value=bool(rep), disabled=not rep,
-                                         key=f"use_calib_{bool(rep)}")
-    if rep and s["use_calib"]:
-        st.sidebar.caption(f"η = {rep.tube.eta.value:.4f}, p_y = {rep.py.py.value/1e6:.0f} MPa [보정 후]"
-                           if rep.tube and rep.py else "보정 결과 일부만 적용")
+    s["site"] = ss["site"]
     return s
+
+
+def _auto_membrane(s, t_m: float, ss) -> bool:
+    """굽힘만으로 풀었을 때 w/t > 0.2 면 막 강성을 넣는다 (Shivakumar 기준)."""
+    if st.session_state.get("k_fit") is not None:
+        return False          # 실측 강성에는 막 효과가 이미 들어 있다
+    try:
+        plate = plate_from_material(s["material"], ss["orient"], t_m, units.mm_to_m(ss["a_mm"]), ss["bc"])
+        E_in = simulate_fall(s["ball"], s["height"], s["tube"], current_params(s)).energy
+        Y = s["material"].props(ss["orient"]).flex_strength
+        Es = effective_modulus(s["ball"].material.E.require(), s["ball"].material.nu.require(),
+                               plate.E, plate.nu)
+        F, _, _ = energy_balance(E_in, Es, s["ball"].radius, ss["py_ratio"] * Y.require(),
+                                 plate.k_bending())
+        return float(F) / plate.k_bending() / t_m > 0.2
+    except Exception:
+        return False
 
 
 def current_params(s) -> FallParams:
     rep = st.session_state.get("report")
-    if s["use_calib"] and rep is not None:
+    if s.get("use_calib") and rep is not None:
         return rep.params
     return FallParams()
 
@@ -246,8 +360,51 @@ def current_py(s) -> Quantity:
     Y = s["material"].props(s["cfg"].orientation).flex_strength
     if not Y.known:
         return unverified("Pa", "굽힘강도 미입력 — p_y 를 정할 수 없다")
-    return Quantity(1.6 * Y.value, "Pa", Label.ASSUMPTION, None,
-                    f"p_y = 1.6·Y (Y=굽힘강도 대용값). {SRC_YIELD_16}")
+    ratio = float(s.get("py_ratio", 1.6))
+    return Quantity(ratio * Y.value, "Pa", Label.ASSUMPTION, None,
+                    f"p_y = {ratio:.1f}·Y (Y=굽힘강도 대용값). {SRC_YIELD_16}")
+
+
+
+def prediction_band(s, imp, plate_nom, py: Quantity) -> dict:
+    """가정 때문에 생기는 예측 폭을 시나리오별로 낸다.
+
+    2자유도 명목 해에 에너지 균형 모델의 시나리오 비율을 곱한다(A-17 과 같은 방식, 계산값).
+    실측 강성이 있으면 경계조건 시나리오는 빼고, p_y 가 보정됐으면 p_y 시나리오를 뺀다.
+    """
+    cfg, mat = s["cfg"], s["material"]
+    E_in = 0.5 * s["ball"].mass * imp.v_in**2
+    R = s["ball"].radius
+    Es = effective_modulus(s["ball"].material.E.require(), s["ball"].material.nu.require(),
+                           plate_nom.E, plate_nom.nu)
+
+    def F_eb(kb, km, py_val):
+        F, _, _ = energy_balance(E_in, Es, R, py_val, kb, km)
+        return float(F)
+
+    base = F_eb(plate_nom.k_bending(), plate_nom.k_membrane, py.require())
+    scen = {}
+    if cfg.k_measured is None:
+        for bc, label in (("clamped", "경계조건 고정단"), ("simply_supported", "경계조건 단순지지")):
+            p2 = plate_from_material(mat, cfg.orientation, cfg.thickness, cfg.ring_radius, bc,
+                                     membrane=cfg.membrane)
+            scen[label] = F_eb(p2.k_bending(), p2.k_membrane, py.require())
+    if py.label is not Label.CALIBRATED:
+        Y = mat.props(cfg.orientation).flex_strength.require()
+        for ratio in (1.6, 3.0):
+            scen[f"p_y = {ratio:.1f}·Y"] = F_eb(plate_nom.k_bending(), plate_nom.k_membrane, ratio * Y)
+    p_no_mem = plate_from_material(mat, cfg.orientation, cfg.thickness, cfg.ring_radius, plate_nom.bc,
+                                   membrane=False, k_measured=cfg.k_measured)
+    p_mem = plate_from_material(mat, cfg.orientation, cfg.thickness, cfg.ring_radius, plate_nom.bc,
+                                membrane=True, k_measured=cfg.k_measured)
+    scen["막 효과 제외"] = F_eb(p_no_mem.k_bending(), p_no_mem.k_membrane, py.require())
+    scen["막 효과 포함"] = F_eb(p_mem.k_bending(), p_mem.k_membrane, py.require())
+
+    out = {}
+    for name, F in scen.items():
+        F_plate = imp.F_plate_max * F / base
+        out[name] = (F_plate, reference_stress(F_plate, plate_nom, imp.contact_radius).max)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -336,6 +493,30 @@ def tab_impact(s):
                  f"구슬/판 질량비 {imp.mass_ratio:.2f}")
         st.write(f"- p_y = {q_text(py, '{:.0f}', 1e-6, 'MPa')}")
         st.caption(SRC_THORNTON)
+    with st.expander("가정이 만드는 예측 폭 (무엇을 재면 줄어드는지)", expanded=True):
+        plate_nom = plate_from_material(mat, cfg.orientation, cfg.thickness, cfg.ring_radius, bc0,
+                                        membrane=cfg.membrane, k_measured=cfg.k_measured,
+                                        km_measured=cfg.km_measured)
+        band = prediction_band(s, imp, plate_nom, py)
+        bdf = pd.DataFrame([{"시나리오": k, "판 반력 [N]": v[0], "굽힘응력 [MPa]": v[1] / 1e6,
+                             "판정": "파손" if v[1] > strength.require() else "유지"}
+                            for k, v in band.items()])
+        lo, hi = bdf["굽힘응력 [MPa]"].min(), bdf["굽힘응력 [MPa]"].max()
+        st.markdown(f"**응력 예측 폭: {lo:.0f} – {hi:.0f} MPa** "
+                    f"(굽힘강도 {strength.require()/1e6:.0f} MPa) · 폭 ±{(hi-lo)/(hi+lo)*100:.0f} % [계산값]")
+        st.dataframe(bdf.round(1), width="stretch", hide_index=True)
+        tips = []
+        if cfg.k_measured is None:
+            tips.append("**판 강성을 실측**하면 경계조건 항이 사라진다 (오차 예산에서 가장 큰 항목)")
+        if py.label is not Label.CALIBRATED:
+            tips.append("**압흔을 재서 p_y 를 보정**하면 p_y 항이 사라진다")
+        if cfg.membrane:
+            tips.append("막 효과를 포함해 계산 중이다 (w/t > 0.2)")
+        else:
+            tips.append("막 효과는 제외돼 있다 — 처짐이 두께의 0.2배를 넘으면 사이드바에서 포함으로 바꾼다")
+        for tip in tips:
+            st.markdown(f"- {tip}")
+
     show_warnings(assess.warnings)
 
     with st.expander("불확실성: 몬테카를로 파손확률 곡선과 h50"):
@@ -349,7 +530,9 @@ def tab_impact(s):
                 mc = failure_probability_curve(
                     s["ball"], mat, cfg.orientation, cfg.thickness, cfg.ring_radius, bc0, hs, py,
                     Kt=(case.Kt.value if case.Kt is not None else 1.0), fall_params=params,
-                    fit=fit, n=int(n_mc))
+                    fit=fit, n=int(n_mc), membrane=cfg.membrane,
+                    k_measured=(Quantity(cfg.k_measured, "N/m", Label.CALIBRATED)
+                                if cfg.k_measured else None))
             fig = go.Figure(go.Scatter(x=mc.heights, y=mc.p_fail, mode="lines+markers",
                                        line=dict(color=ACCENT), name="파손확률"))
             fig.add_hline(y=0.5, line=dict(color=GRAYS[2], dash="dot"))
@@ -556,6 +739,40 @@ def tab_helmet(s):
 # 탭 4 — 보정
 # ---------------------------------------------------------------------------
 def tab_calibration(s):
+    st.markdown("#### 0. 판 강성 실측 (선택) — 오차를 가장 크게 줄이는 항목")
+    st.caption("시편을 치구에 물린 채 중앙을 정적으로 눌러 하중과 처짐을 기록한다. "
+               "P = K_b·w + K_m·w³ 를 적합해 경계조건 가정을 대체한다.")
+    c1, c2 = st.columns([2, 1])
+    default_rows = pd.DataFrame({"처짐 [mm]": [0.2, 0.5, 1.0, 1.5, 2.0],
+                                 "하중 [N]": [0.0, 0.0, 0.0, 0.0, 0.0]})
+    edited = c1.data_editor(st.session_state.get("k_rows", default_rows), num_rows="dynamic",
+                            width="stretch", key="k_editor")
+    st.session_state["k_rows"] = edited
+    with_mem = c2.checkbox("막 항 K_m 도 적합", value=False,
+                           help="처짐이 두께의 0.2배를 넘는 구간까지 측정했을 때만 켠다")
+    if c2.button("강성 적합", type="primary"):
+        try:
+            w = units.mm_to_m(pd.to_numeric(edited["처짐 [mm]"], errors="coerce").to_numpy(float))
+            P = pd.to_numeric(edited["하중 [N]"], errors="coerce").to_numpy(float)
+            ok = ~(np.isnan(w) | np.isnan(P)) & (w > 0)
+            fit_k = fit_plate_stiffness(w[ok], P[ok], with_membrane=with_mem)
+            st.session_state["k_fit"] = fit_k
+            theory = plate_from_material(s["material"], s["cfg"].orientation, s["cfg"].thickness,
+                                         s["cfg"].ring_radius, "clamped")
+            st.success(f"K_b = {fit_k.kb.value/1e3:.1f} kN/m [보정 후] · R² = {fit_k.r2:.4f} · "
+                       f"고정단 이론값 대비 {100*fit_k.kb.value/theory.k_bending():.0f} % "
+                       f"(100 %면 완전 고정단, 낮을수록 단순지지에 가깝다)")
+            show_warnings(fit_k.warnings)
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
+    if st.session_state.get("k_fit") is not None:
+        kf = st.session_state["k_fit"]
+        st.info(f"현재 적용 중: K_b = {kf.kb.value/1e3:.1f} kN/m"
+                + (f", K_m = {kf.km.value/1e9:.2f} GN/m³" if kf.km else "")
+                + " — 판 충돌·분할 비교·몬테카를로가 모두 이 값을 쓴다")
+
+    st.markdown("---")
     st.markdown("#### 1. 파손 판정 기준 (실험 전 입력·저장)")
     path = Path("data/criteria.json")
     cur = st.session_state.get("criteria") or load_criteria(path)

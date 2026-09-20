@@ -244,6 +244,55 @@ def fit_tube(df: pd.DataFrame, rig: RigSetup, fit_K: bool = False) -> TubeFit:
 
 
 # ---------------------------------------------------------------------------
+# 판 강성 적합 (정적 압입 시험) — 경계조건 가정을 없앤다
+# ---------------------------------------------------------------------------
+@dataclass
+class PlateStiffnessFit:
+    kb: Quantity            # N/m
+    km: Quantity | None     # N/m³ (막 항을 같이 적합했을 때)
+    r2: float
+    n: int
+    rmse: float             # N
+    warnings: WarningLog
+
+
+def fit_plate_stiffness(deflection_m, load_N, with_membrane: bool = False) -> PlateStiffnessFit:
+    """정적 압입 시험(하중-처짐)으로 K_b (필요하면 K_m 까지) 를 적합한다.
+
+    모델: P = K_b·w + K_m·w³ (원점을 지나는 최소제곱). 경계조건을 가정하지 않으므로
+    '고정단이냐 단순지지냐'에서 오는 가장 큰 불확실성이 제거된다.
+    """
+    log = WarningLog()
+    w = np.asarray(deflection_m, float)
+    P = np.asarray(load_N, float)
+    if w.size != P.size or w.size < 2:
+        raise SimInputError("처짐과 하중을 2점 이상, 같은 개수로 입력해야 한다")
+    if np.any(w <= 0) or np.any(P < 0):
+        raise SimInputError("처짐은 양수, 하중은 0 이상이어야 한다")
+    X = np.column_stack([w, w**3]) if with_membrane else w.reshape(-1, 1)
+    coef, *_ = np.linalg.lstsq(X, P, rcond=None)
+    pred = X @ coef
+    ss_res = float(((P - pred) ** 2).sum())
+    ss_tot = float(((P - P.mean()) ** 2).sum())
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+    rmse = math.sqrt(ss_res / w.size)
+    kb = float(coef[0])
+    km = float(coef[1]) if with_membrane else None
+    if kb <= 0:
+        raise SimInputError("적합된 판 강성이 0 이하다 — 데이터를 확인해야 한다")
+    if with_membrane and km is not None and km < 0:
+        log.add("km_negative", Severity.WARNING,
+                "적합된 막 강성이 음수다 — 처짐 범위가 좁거나 잡음이 크다. 막 항 없이 적합하는 편이 낫다")
+    if w.size < 4:
+        log.add("stiffness_n", Severity.INFO, f"{w.size}점으로 적합했다 — 5점 이상을 권장한다")
+    return PlateStiffnessFit(
+        Quantity(kb, "N/m", Label.CALIBRATED, None, "정적 압입 시험 최소제곱"),
+        Quantity(km, "N/m^3", Label.CALIBRATED, None, "정적 압입 시험 최소제곱") if km is not None else None,
+        r2, int(w.size), rmse, log,
+    )
+
+
+# ---------------------------------------------------------------------------
 # p_y 적합 (압흔 깊이)
 # ---------------------------------------------------------------------------
 @dataclass

@@ -85,6 +85,9 @@ class SpecimenConfig:
     seam_length: float | None = None   # 쿠폰 내 이음선 총 길이 m (CAD)
     fastener: FastenerSpec | None = None
     vent: VentSpec | None = None
+    membrane: bool = False             # 막 강성 포함 (고정단 이론식)
+    k_measured: float | None = None    # 정적 압입 시험으로 잰 판 강성 [N/m]
+    km_measured: float | None = None   # 같은 시험에서 적합한 막 강성 [N/m³]
 
     def __post_init__(self):
         if self.config_type not in CONFIG_TYPES:
@@ -179,6 +182,10 @@ class SiteAssessment:
 
 
 def _bcs_for(cfg: SpecimenConfig, log: WarningLog) -> list[str]:
+    if cfg.k_measured is not None:
+        log.add("k_measured", Severity.INFO,
+                "판 강성 실측값을 쓴다 — 고정단/단순지지 가정에서 오는 불확실성이 사라진다")
+        return [cfg.bc]
     if not cfg.segmented:
         return [cfg.bc]
     if cfg.lock:
@@ -265,7 +272,9 @@ def assess_site(
     E1 = ball_E if ball_E is not None else ball.material.E.require()
     nu1 = ball_nu if ball_nu is not None else ball.material.nu.require()
     for bc in _bcs_for(cfg, log):
-        plate = plate_from_material(material, cfg.orientation, cfg.thickness, cfg.ring_radius, bc)
+        plate = plate_from_material(material, cfg.orientation, cfg.thickness, cfg.ring_radius, bc,
+                                    membrane=cfg.membrane, k_measured=cfg.k_measured,
+                                    km_measured=cfg.km_measured)
         law = ThorntonLaw(effective_modulus(E1, nu1, plate.E, plate.nu), ball.radius, py.require("p_y"))
         Y = material.props(cfg.orientation).flex_strength.value
         imp = simulate_impact(ball, v_impact, plate, law, mode, yield_proxy=Y, basis=basis)

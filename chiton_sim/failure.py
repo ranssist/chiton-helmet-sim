@@ -134,6 +134,22 @@ def _thornton_W_unload(dmax, Es, R, py):
     return (8.0 / 15.0) * Es * np.sqrt(Rp) * (dmax - dp) ** 2.5
 
 
+def _contact_delta_from_F(F, Es, R, py):
+    """접촉력 F 를 주는 접근량 δ (Thornton 하중 곡선의 역함수, 닫힌 해)."""
+    dy = R * (np.pi * py / (2.0 * Es)) ** 2
+    Fy = _hertz_F(dy, Es, R)
+    d_el = (3.0 * np.maximum(F, 0.0) / (4.0 * Es * np.sqrt(R))) ** (2.0 / 3.0)
+    d_pl = dy + (F - Fy) / (np.pi * py * R)
+    return np.where(F <= Fy, d_el, d_pl)
+
+
+def k_membrane_array(E, nu, t, a, bc, membrane: bool):
+    """막 강성 K_m [N/m³] (고정단·이동불가, Shivakumar Table 1). 그 외에는 0."""
+    if not membrane or bc != "clamped":
+        return np.zeros_like(np.asarray(E, float))
+    return (353.0 - 191.0 * nu) * np.pi * E * t / (648.0 * (1.0 - nu) * a**2)
+
+
 def k_bending_array(E, nu, t, a, bc):
     D = E * t**3 / (12.0 * (1.0 - nu**2))
     if bc == "clamped":
@@ -150,16 +166,23 @@ def roark_array(P, t, a, nu, r0, bc):
     return base * (lt + 1.0)
 
 
-def energy_balance(E_in, Es, R, py, Kb, iters: int = 80):
-    """E_in = W_load(δ) + F(δ)²/(2K_b) 를 δ 에 대해 이분법으로 푼다. 반환 (F_max, δ_max, E_abs)."""
-    E_in, Es, py, Kb = np.broadcast_arrays(*(np.asarray(v, float) for v in (E_in, Es, py, Kb)))
+def energy_balance(E_in, Es, R, py, Kb, Km=0.0, iters: int = 90):
+    """E_in = W_load(δ) + ½K_b w² + ¼K_m w⁴ 를 판 처짐 w 에 대해 이분법으로 푼다.
 
-    def total(d):
-        F, W, _, _ = _thornton_F_W(d, Es, R, py)
-        return W + F**2 / (2.0 * Kb)
+    판 반력 F = K_b w + K_m w³ 이고, 접촉 접근량 δ 는 Thornton 하중식의 역함수로 바로 얻는다.
+    반환 (F_max, δ_max, E_abs).
+    """
+    E_in, Es, py, Kb, Km = np.broadcast_arrays(
+        *(np.asarray(v, float) for v in (E_in, Es, py, Kb, Km)))
+
+    def total(w):
+        F = Kb * w + Km * w**3
+        d = _contact_delta_from_F(F, Es, R, py)
+        _, W, _, _ = _thornton_F_W(d, Es, R, py)
+        return W + 0.5 * Kb * w**2 + 0.25 * Km * w**4
 
     hi = np.full(E_in.shape, 1e-6)
-    for _ in range(60):
+    for _ in range(80):
         low = total(hi) < E_in
         if not low.any():
             break
@@ -170,9 +193,11 @@ def energy_balance(E_in, Es, R, py, Kb, iters: int = 80):
         below = total(mid) < E_in
         lo = np.where(below, mid, lo)
         hi = np.where(below, hi, mid)
-    d = 0.5 * (lo + hi)
-    F, W, _, _ = _thornton_F_W(d, Es, R, py)
-    E_abs = W - _thornton_W_unload(d, Es, R, py)   # 판 질량 무시: 판 탄성에너지는 모두 반환
+    w = 0.5 * (lo + hi)
+    F = Kb * w + Km * w**3
+    d = _contact_delta_from_F(F, Es, R, py)
+    _, W, _, _ = _thornton_F_W(d, Es, R, py)
+    E_abs = W - _thornton_W_unload(d, Es, R, py)   # 판 탄성에너지는 모두 반환된다고 본다
     return F, d, E_abs
 
 
@@ -215,6 +240,8 @@ def failure_probability_curve(
     fit: CriticalEnergyFit | None = None,
     n: int = 2000,
     seed: int = 20260920,
+    membrane: bool = False,
+    k_measured: Quantity | None = None,
 ) -> MonteCarloResult:
     """높이별 파손확률. fit 이 있으면 주 판정(E_abs vs E_c), 없으면 참고 판정(σ vs 굽힘강도)."""
     rng = np.random.default_rng(seed)
@@ -236,11 +263,16 @@ def failure_probability_curve(
     calibrated_py = py.label is Label.CALIBRATED
     # 보정 전: p_y = 1.6·Y, Y = 굽힘강도 표본 (A-05)
     py_s = np.full(n, py.require("p_y")) if calibrated_py else (py.require() / props.flex_strength.value) * sig_f
-    Kb = k_bending_array(E_p, nu, t, a, bc)
+    if k_measured is not None and k_measured.known:
+        Kb = np.full(n, k_measured.value)          # 실측 강성: 경계조건 가정을 쓰지 않는다
+    else:
+        Kb = k_bending_array(E_p, nu, t, a, bc)
+    Km = k_membrane_array(E_p, nu, t, a, bc, membrane)
     R = ball.radius
 
     # 명목값
-    plate_nom = plate_from_material(material, orientation, t, a, bc)
+    plate_nom = plate_from_material(material, orientation, t, a, bc, membrane=membrane,
+                                    k_measured=(k_measured.value if (k_measured is not None and k_measured.known) else None))
     Es_nom = effective_modulus(bm.E.value, bm.nu.value, plate_nom.E, nu)
     law_nom = ThorntonLaw(Es_nom, R, py.require())
     log = WarningLog()
@@ -253,8 +285,9 @@ def failure_probability_curve(
         E_in = fr.energy
         imp = simulate_impact(ball, fr.v_impact, plate_nom, law_nom, "2dof")
         log.extend(imp.warnings)
-        F_nom, _, Eabs_nom = energy_balance(E_in, Es_nom, R, py.require(), plate_nom.k_bending())
-        F, d, E_abs = energy_balance(E_in, Es, R, py_s, Kb)
+        F_nom, _, Eabs_nom = energy_balance(E_in, Es_nom, R, py.require(),
+                                            plate_nom.k_bending(), plate_nom.k_membrane)
+        F, d, E_abs = energy_balance(E_in, Es, R, py_s, Kb, Km)
         if fit is None:
             corr[i] = imp.F_plate_max / float(F_nom)
             sigma = Kt * roark_array(corr[i] * F, t, a, nu, np.sqrt(R * d), bc)
@@ -262,6 +295,8 @@ def failure_probability_curve(
         else:
             corr[i] = imp.E_abs / float(Eabs_nom) if Eabs_nom > 0 else 1.0
             p_fail[i] = np.mean(np.log(np.maximum(corr[i] * E_abs, 1e-300)) > log_Ec)
-    basis = Basis.POST.value if (fit is not None or calibrated_py or fall_params.basis is Basis.POST) else Basis.PRE.value
+    calibrated_k = k_measured is not None and k_measured.known
+    basis = (Basis.POST.value if (fit is not None or calibrated_py or calibrated_k
+                                  or fall_params.basis is Basis.POST) else Basis.PRE.value)
     return MonteCarloResult(np.asarray(heights, float), p_fail, _interp_h50(np.asarray(heights, float), p_fail),
                             "main" if fit is not None else "reference", basis, n, corr, log)

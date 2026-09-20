@@ -21,6 +21,12 @@ SRC_ROARK = (
 BOUNDARY_CONDITIONS = ("clamped", "simply_supported")
 
 
+SRC_KM = (
+    "Shivakumar 외 NASA TM-85703 Table 1 (Volmir 인용) — 고정단·가장자리 이동불가 판의 막 강성: "
+    "Km = (353 − 191ν)πEh / (648(1−ν)a²). 단순지지 식은 원문 스캔에서 확인하지 못했다"
+)
+
+
 @dataclass(frozen=True)
 class Plate:
     E: float        # Pa (굽힘탄성률 사용, 가정 A-23)
@@ -29,6 +35,9 @@ class Plate:
     t: float        # 두께 m
     a: float        # 고정 링 내반경 m
     bc: str = "clamped"
+    k_measured: float | None = None    # 정적 압입 시험으로 잰 판 강성 [N/m] — 경계조건 가정을 대체한다
+    km_measured: float | None = None   # 같은 시험에서 적합한 막 강성 [N/m³]
+    membrane: bool = False             # 이론 막 강성 사용 여부 (k_measured 가 있으면 그쪽이 우선)
 
     def __post_init__(self) -> None:
         if self.bc not in BOUNDARY_CONDITIONS:
@@ -42,13 +51,36 @@ class Plate:
         return self.E * self.t**3 / (12.0 * (1.0 - self.nu**2))
 
     def k_bending(self, bc: str | None = None) -> float:
-        """중앙 집중하중에 대한 판 강성 [N/m]."""
+        """중앙 집중하중에 대한 판 강성 [N/m]. 실측값이 있으면 그 값을 쓴다."""
+        if self.k_measured is not None and bc is None:
+            return self.k_measured
         bc = bc or self.bc
         if bc == "clamped":
             return 16.0 * math.pi * self.D / self.a**2
         if bc == "simply_supported":
             return 16.0 * math.pi * (1.0 + self.nu) * self.D / ((3.0 + self.nu) * self.a**2)
         raise ValueError(bc)
+
+    @property
+    def k_membrane(self) -> float:
+        """막 강성 [N/m³]. 실측 적합값 > 이론값(고정단만) > 0 순서."""
+        if self.km_measured is not None:
+            return self.km_measured
+        if not self.membrane or self.bc != "clamped":
+            return 0.0
+        return (353.0 - 191.0 * self.nu) * math.pi * self.E * self.t / (648.0 * (1.0 - self.nu) * self.a**2)
+
+    def force(self, w: float) -> float:
+        """판 반력 P = K_b·w + K_m·w³ (막 강성이 0이면 선형)."""
+        return self.k_bending() * w + self.k_membrane * w**3
+
+    def energy(self, w: float) -> float:
+        """판에 저장된 변형에너지 = ½K_b w² + ¼K_m w⁴."""
+        return 0.5 * self.k_bending() * w**2 + 0.25 * self.k_membrane * w**4
+
+    def fixity(self) -> float:
+        """유효 구속도 = 실측 강성 / 고정단 이론값 (1.0 이면 완전 고정단)."""
+        return self.k_bending() / self.k_bending("clamped")
 
     @property
     def mass(self) -> float:
@@ -64,14 +96,16 @@ class Plate:
 
 
 def plate_from_material(
-    material: FilamentMaterial, orientation: str, t: float, a: float, bc: str = "clamped"
+    material: FilamentMaterial, orientation: str, t: float, a: float, bc: str = "clamped",
+    membrane: bool = False, k_measured: float | None = None, km_measured: float | None = None,
 ) -> Plate:
     p = material.props(orientation)
     return Plate(
         E=p.flex_modulus.require("굽힘탄성률"),
         nu=material.poisson.require("푸아송비"),
         rho=material.density.require("밀도"),
-        t=t, a=a, bc=bc,
+        t=t, a=a, bc=bc, membrane=membrane,
+        k_measured=k_measured, km_measured=km_measured,
     )
 
 
