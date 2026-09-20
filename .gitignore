@@ -13,3 +13,8 @@ data/criteria.json          # 실험별 파손 판정 기준(로컬 기록)
 Thumbs.db
 .idea/
 .vscode/
+
+# 임시 출력
+out.txt
+runbat.log
+runbat.err
