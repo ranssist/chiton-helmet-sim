@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .provenance import Label, Quantity, assumed, unverified
+from .provenance import Label, Quantity, assumed, computed, unverified
 
 # ---------------------------------------------------------------------------
 # 출처
@@ -27,6 +27,23 @@ SRC_ARPRO_EPP = (
     "https://www.foam-industries.com/hubfs/Technical%20Documents/TechDataHome_PhysicalPropertyInformation_EPPproducts.pdf"
 )
 SRC_PSI = "NIST SP 811 (2008), 1 psi = 6.894757 kPa"
+SRC_BAMBU_PETG_HF = (
+    "Bambu Lab, PETG HF Technical Data Sheet V1.0, "
+    "https://store.bblcdn.com/3a230e260a3a47c2b0db0156e07eef91.pdf"
+)
+SRC_ARAMID_EPOXY = (
+    "N.M. Meliande 외, Curaua–aramid hybrid laminated composites for impact applications: "
+    "Flexural, Charpy impact and elastic properties, Polymers 14(18):3749 (2022), "
+    "doi:10.3390/polym14183749 — 100 % 아라미드(에폭시 기지, 섬유부피 73.3 %) 적층판, ASTM D790-17"
+)
+SRC_UHMWPE = (
+    "J. Bian 외, Polymers 16(21):2985 (2024), doi:10.3390/polym16212985 Table 3 "
+    "(원출처 P. Hu 외, Compos. Struct. 290:115499 (2022)) — UHMWPE 적층판 시뮬레이션 입력 물성"
+)
+SRC_FASTSF_SHELL = (
+    "Ops-Core FAST SF Data Sheet (Gentex, REV.20230306): 면밀도 5957 g/m², 셸 두께 5.58 mm 에서 "
+    "밀도를 역산했다. 셸은 탄소·UHMWPE·아라미드 하이브리드다"
+)
 
 # ---------------------------------------------------------------------------
 # 물리 상수
@@ -87,6 +104,8 @@ class FilamentMaterial:
     tds_annealed: bool = True    # TDS 시편 어닐링 여부
     source: str = ""
     notes: tuple[str, ...] = field(default_factory=tuple)
+    kind: str = "filament"       # "filament"(출력 가능) | "composite"(실제 방탄모 계열, 비교용)
+    printable: bool = True
 
     def props(self, orientation: str) -> OrientationProps:
         """출력 방향별 물성. XY=평판을 눕혀 출력, Z=세워 출력(가정 A-04)."""
@@ -127,6 +146,126 @@ BAMBU_PLA_BASIC = FilamentMaterial(
     source=SRC_BAMBU_PLA,
     notes=("TDS 시편: 인필 100 %, 노즐 220 °C, 55 °C·8 h 어닐링 후 시험",),
 )
+
+
+def _petg(v: float, sd: float | None, unit: str, note: str = "") -> Quantity:
+    return Quantity(v, unit, Label.LITERATURE, SRC_BAMBU_PETG_HF, note, sd=sd)
+
+
+BAMBU_PETG_HF = FilamentMaterial(
+    name="Bambu PETG HF (TDS V1.0)",
+    density=_petg(1280.0, None, "kg/m^3", "ISO 1183, 1.28 g/cm³"),
+    poisson=assumed(0.40, "-", "TDS에 없음 — PETG 일반값 가정(A-28)"),
+    xy=OrientationProps(
+        flex_modulus=_petg(2050e6, 120e6, "Pa", "ISO 178"),
+        flex_strength=_petg(64e6, 3e6, "Pa", "ISO 178"),
+        tensile_strength=_petg(34e6, 4e6, "Pa", "ISO 527"),
+        youngs_modulus=_petg(1810e6, 190e6, "Pa", "ISO 527"),
+        elongation=_petg(0.086, 0.012, "-", "ISO 527, 8.6 %"),
+        impact_unnotched=_petg(31.5e3, 2.2e3, "J/m^2", "ISO 179 비노치 (노치 6.2±1.8 kJ/m²)"),
+    ),
+    z=OrientationProps(
+        flex_modulus=_petg(1810e6, 140e6, "Pa", "ISO 178"),
+        flex_strength=_petg(48e6, 4e6, "Pa", "ISO 178"),
+        tensile_strength=_petg(23e6, 4e6, "Pa", "ISO 527"),
+        youngs_modulus=_petg(1540e6, 130e6, "Pa", "ISO 527"),
+        elongation=_petg(0.051, 0.008, "-", "ISO 527, 5.1 %"),
+        impact_unnotched=_petg(10.6e3, 1.2e3, "J/m^2", "ISO 179"),
+    ),
+    source=SRC_BAMBU_PETG_HF,
+    notes=("TDS 시편: 인필 100 %, 노즐 255 °C, 75 °C·8 h 어닐링 후 시험",
+           "제조사는 PETG HF 출력물의 어닐링을 권하지 않는다"),
+)
+
+
+# ---------------------------------------------------------------------------
+# 실제 방탄모 계열 셸 재질 — 둔탁 충격 비교용이며 방탄 성능과 무관하다
+# ---------------------------------------------------------------------------
+COMPOSITE_NOTE = (
+    "복합 적층판이다. 이 모델은 등방성 평판·Thornton 접촉을 가정하므로 층간 박리, 섬유 파단, "
+    "변형률 속도 의존성을 보지 못한다. 방탄 성능 비교가 아니라 같은 두께·면밀도에서의 "
+    "굽힘 강성과 무게 비교로만 쓴다"
+)
+
+
+def _iso_props(E: Quantity, S: Quantity) -> OrientationProps:
+    """면내 등방으로 본 적층판: 굽힘 물성만 채우고 나머지는 미확인."""
+    return OrientationProps(
+        flex_modulus=E, flex_strength=S,
+        tensile_strength=unverified("Pa", "적층판 인장강도 — 이 모델에 쓰지 않는다"),
+        youngs_modulus=E, elongation=unverified("-", "미확인"),
+        impact_unnotched=unverified("J/m^2", "미확인"),
+    )
+
+
+ARAMID_EPOXY = FilamentMaterial(
+    name="아라미드/에폭시 적층판 (문헌 시험편)",
+    density=Quantity(1320.0, "kg/m^3", Label.LITERATURE, SRC_ARAMID_EPOXY, "논문 시편 질량·치수 기준"),
+    poisson=assumed(0.30, "-", "적층판 면내 푸아송비 — 논문에 없어 가정(A-29)"),
+    xy=_iso_props(
+        Quantity(10.38e9, "Pa", Label.LITERATURE, SRC_ARAMID_EPOXY, "굽힘탄성률 10.38 ± 0.60 GPa", sd=0.60e9),
+        Quantity(109.02e6, "Pa", Label.LITERATURE, SRC_ARAMID_EPOXY, "굽힘강도 109.02 ± 10.83 MPa", sd=10.83e6),
+    ),
+    z=_iso_props(
+        Quantity(10.38e9, "Pa", Label.LITERATURE, SRC_ARAMID_EPOXY, "면내 값과 같게 둔다(적층판)", sd=0.60e9),
+        Quantity(109.02e6, "Pa", Label.LITERATURE, SRC_ARAMID_EPOXY, "면내 값과 같게 둔다(적층판)", sd=10.83e6),
+    ),
+    tds_annealed=False, source=SRC_ARAMID_EPOXY,
+    notes=(COMPOSITE_NOTE, "PASGT·ACH 의 PVB-페놀릭 기지와는 기지 수지가 다르다(에폭시)"),
+    kind="composite", printable=False,
+)
+
+UHMWPE_LAMINATE = FilamentMaterial(
+    name="UHMWPE 적층판 (Dyneema 계열)",
+    density=Quantity(970.0, "kg/m^3", Label.LITERATURE, SRC_UHMWPE, "0.97 g/cm³"),
+    poisson=assumed(0.30, "-", "문헌 표에 없어 가정(A-29)"),
+    xy=_iso_props(
+        Quantity(30.7e9, "Pa", Label.LITERATURE, SRC_UHMWPE,
+                 "면내 탄성계수 E1=E2=30.7 GPa — 굽힘탄성률이 아니다. 굽힘에서는 이보다 낮게 나온다"),
+        unverified("Pa", "굽힘강도 미확인 — 인장 3.1 GPa 는 굽힘 파손 기준이 아니다. 실측 입력 필요"),
+    ),
+    z=_iso_props(
+        Quantity(1.97e9, "Pa", Label.LITERATURE, SRC_UHMWPE, "두께 방향 E3 = 1.97 GPa"),
+        unverified("Pa", "굽힘강도 미확인"),
+    ),
+    tds_annealed=False, source=SRC_UHMWPE,
+    notes=(COMPOSITE_NOTE,
+           "굽힘·전단이 약한 재료다. 굽힘강도가 미확인이라 파손 판정은 나오지 않는다(면밀도·강성 비교만 가능)"),
+    kind="composite", printable=False,
+)
+
+FASTSF_HYBRID_SHELL = FilamentMaterial(
+    name="FAST SF 하이브리드 셸 (탄소+UHMWPE+아라미드)",
+    density=computed(5.957 / 5.58e-3, "kg/m^3", "데이터시트 면밀도 5957 g/m² ÷ 두께 5.58 mm"),
+    poisson=assumed(0.30, "-", "미확인 — 가정(A-29)"),
+    xy=_iso_props(unverified("Pa", "굽힘탄성률 미확인 — 제조사 비공개"),
+                  unverified("Pa", "굽힘강도 미확인 — 제조사 비공개")),
+    z=_iso_props(unverified("Pa", "미확인"), unverified("Pa", "미확인")),
+    tds_annealed=False, source=SRC_FASTSF_SHELL,
+    notes=(COMPOSITE_NOTE, "무게·면밀도 비교 기준으로만 쓴다. 굽힘 물성이 없어 충돌 해석은 하지 못한다"),
+    kind="composite", printable=False,
+)
+
+MATERIAL_LIBRARY: dict[str, FilamentMaterial] = {
+    m.name: m for m in (BAMBU_PLA_BASIC, BAMBU_PETG_HF, ARAMID_EPOXY, UHMWPE_LAMINATE,
+                        FASTSF_HYBRID_SHELL)
+}
+
+
+def material_warnings(material: FilamentMaterial, orientation: str = "XY"):
+    """재료 선택에 따른 적용범위 경고."""
+    from .provenance import Severity, WarningLog
+    log = WarningLog()
+    if material.kind == "composite":
+        log.add("composite_material", Severity.WARNING, f"{material.name}: {COMPOSITE_NOTE}")
+    p = material.props(orientation)
+    if not p.flex_strength.known:
+        log.add("no_flex_strength", Severity.WARNING,
+                f"{material.name}: 굽힘강도가 미확인이라 파손 판정을 낼 수 없다 — 면밀도·강성만 비교한다")
+    if not p.flex_modulus.known:
+        log.add("no_flex_modulus", Severity.WARNING,
+                f"{material.name}: 굽힘탄성률이 미확인이라 충돌 해석을 하지 못한다")
+    return log
 
 
 def user_filament(

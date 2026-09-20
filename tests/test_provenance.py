@@ -14,6 +14,13 @@ PKG = Path(__file__).resolve().parents[1] / "chiton_sim"
 
 
 def _all_quantities():
+    for name, mat in M.MATERIAL_LIBRARY.items():
+        yield f"{name}.density", mat.density
+        yield f"{name}.poisson", mat.poisson
+        for side in ("xy", "z"):
+            op = getattr(mat, side)
+            for f in fields(op):
+                yield f"{name}.{side}.{f.name}", getattr(op, f.name)
     for name in dir(M):
         obj = getattr(M, name)
         if isinstance(obj, Quantity):

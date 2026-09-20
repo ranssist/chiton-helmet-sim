@@ -1,0 +1,5 @@
+# 선택: 3D 메시(Meshy 등)에서 치수를 뽑을 때만 필요하다 — scripts/mesh_props.py
+# 설치: .venv/Scripts/pip install -r requirements-mesh.txt
+trimesh>=4.0
+shapely>=2.0
+networkx>=3.0

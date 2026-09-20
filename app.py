@@ -32,8 +32,10 @@ from chiton_sim.helmet import (
     shell_mass, simulate_headform, thickness_for_mass,
 )
 from chiton_sim.impact import IMPULSE_NOTE
+from chiton_sim.compare import compare_materials, rank
 from chiton_sim.materials import (
-    BAMBU_PLA_BASIC, EPP_ARPRO_TABLE, EPP_NOTE, epp_stress, user_filament,
+    BAMBU_PLA_BASIC, EPP_ARPRO_TABLE, EPP_NOTE, MATERIAL_LIBRARY, epp_stress, material_warnings,
+    user_filament,
 )
 from chiton_sim.plate import plate_from_material, reference_stress
 from chiton_sim.planner import (
@@ -110,7 +112,7 @@ DEFAULTS = {
     "use_tube": True, "tube_mode": "직접 입력", "tube_len": 1.8, "tube_id": 22.0, "tube_clr": 1.0,
     "cfg_type": "monolithic", "t_mm": 3.0, "a_mm": 40.0, "bc": "clamped", "orient": "XY",
     "infill": 100, "annealed": True, "n_seg": 3, "lock": True, "joint": "print_in_place",
-    "ovl_mm": 5.0, "seam_mm": 120.0, "site": "center", "mat_choice": "Bambu PLA Basic (TDS)",
+    "ovl_mm": 5.0, "seam_mm": 120.0, "site": "center", "mat_choice": "Bambu PLA Basic (TDS V3.0)",
     "membrane_mode": "자동 (w/t > 0.2면 포함)", "py_ratio": 1.6,
     "fst": "(없음)", "fn": 4, "fd": 4.0, "fp": 20.0, "fe": 8.0,
     "use_lim": False, "pd_min": 4.0, "ed_min": 3.0,
@@ -218,9 +220,12 @@ def sidebar():
                          format_func=lambda x: "고정단" if x == "clamped" else "단순지지")
             st.slider("인필 [%]", 10, 100, key="infill", step=5)
             st.checkbox("어닐링함 (55 °C·8 h)", key="annealed")
-            st.radio("재료", ["Bambu PLA Basic (TDS)", "사용자 TDS 입력"], key="mat_choice")
-            if ss["mat_choice"].startswith("Bambu"):
-                material = BAMBU_PLA_BASIC
+            st.selectbox("재료", list(MATERIAL_LIBRARY) + ["사용자 TDS 입력"], key="mat_choice",
+                         help="출력 가능한 필라멘트와, 비교용 실제 방탄모 계열 셸 재질이 함께 들어 있다")
+            if ss["mat_choice"] in MATERIAL_LIBRARY:
+                material = MATERIAL_LIBRARY[ss["mat_choice"]]
+                if material.kind == "composite":
+                    st.warning("복합 적층판이다 — 둔탁 충격 비교용이며 방탄 성능과 무관하다")
             else:
                 name = st.text_input("이름", "PETG (사용자)", key="u_name")
                 src = st.text_input("출처 URL (없으면 '미확인')", "", key="u_src")
@@ -517,6 +522,7 @@ def tab_impact(s):
         for tip in tips:
             st.markdown(f"- {tip}")
 
+    show_warnings(material_warnings(mat, cfg.orientation))
     show_warnings(assess.warnings)
 
     with st.expander("불확실성: 몬테카를로 파손확률 곡선과 h50"):
@@ -733,6 +739,96 @@ def tab_helmet(s):
              + (f"· 대역 감쇠 {mc.bandwidth_error*100:.1f} %" if mc.bandwidth_error is not None else "")
              + f" · 합계 {mc.total_error*100:.1f} % → {'측정 가능' if mc.ok else '측정 불가, 장비 변경 필요'}")
     show_warnings(mc.warnings)
+
+
+
+# ---------------------------------------------------------------------------
+# 탭 — 재료 비교
+# ---------------------------------------------------------------------------
+MATERIAL_CAUTION = """이 표는 **굽힘 기반 둔탁 충격 지표**만 비교한다. 방탄 성능 비교가 아니다.
+복합 적층판(아라미드·UHMWPE·하이브리드)은 층간 박리·섬유 파단·변형률 속도 의존성으로 파손하는데,
+이 모델은 등방성 평판 가정이라 그 파손 방식을 보지 못한다.
+여유율이 높다고 실제로 더 안전하다는 뜻이 아니다 — 뻣뻣한 재료는 하중을 더 끌어와 응력이 커지는 반면
+에너지는 다른 방식으로 흡수한다. 지표별로 따로 보고, 최종 판단은 실측(E50)으로 한다."""
+
+
+def tab_materials(s):
+    cfg = s["cfg"]
+    st.markdown(f"#### 결과 기준: <span class='acc'>{Basis.PRE.value}</span>", unsafe_allow_html=True)
+    st.warning(MATERIAL_CAUTION)
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    names = c1.multiselect("비교할 재료", list(MATERIAL_LIBRARY), default=list(MATERIAL_LIBRARY),
+                           key="cmp_names")
+    basis = c2.radio("비교 기준", ["같은 두께", "같은 면밀도"], key="cmp_basis")
+    ref_name = c3.selectbox("면밀도 기준 재료", list(MATERIAL_LIBRARY), key="cmp_ref")
+    c4, c5 = st.columns(2)
+    a_cm2 = c4.number_input("셸 표면적 A [cm²] (0 = 무게 계산 안 함)", 0.0, 5000.0, 955.0, 10.0,
+                            key="cmp_area", help="FAST SF L 커버리지가 955 cm² 다")
+    sort_by = c5.selectbox("정렬", ["여유율", "무게 대비 여유율", "면밀도(가벼운 순)", "판 강성"],
+                           key="cmp_sort")
+    if not names:
+        st.info("재료를 하나 이상 고른다.")
+        return
+
+    mats = [MATERIAL_LIBRARY[n] for n in names]
+    area = computed(units.cm2_to_m2(a_cm2), "m^2", "사용자 입력") if a_cm2 > 0 else None
+    with st.spinner("재료별 충돌 해석 중..."):
+        rows = compare_materials(
+            mats, s["ball"], s["height"], cfg.thickness, cfg.ring_radius, bc=cfg.bc,
+            orientation=cfg.orientation, py_ratio=s["py_ratio"],
+            basis="same_thickness" if basis == "같은 두께" else "same_areal_density",
+            area=area, tube=s["tube"], fall_params=current_params(s), membrane=cfg.membrane,
+            reference=MATERIAL_LIBRARY[ref_name])
+    key = {"여유율": "margin", "무게 대비 여유율": "specific_margin",
+           "면밀도(가벼운 순)": "areal_density", "판 강성": "k_bending"}[sort_by]
+    rows = rank(rows, key)
+
+    df = pd.DataFrame([{
+        "재료": r.name, "분류": "출력 가능" if r.printable else "비교용(복합재)",
+        "두께 [mm]": units.m_to_mm(r.thickness),
+        "면밀도 [g/cm²]": units.kg_m2_to_g_cm2(r.areal_density) if r.areal_density else None,
+        "셸 무게 [g]": units.kg_to_g(r.shell_mass) if r.shell_mass else None,
+        "판 강성 [kN/m]": r.k_bending / 1e3 if r.k_bending else None,
+        "최대 접촉력 [N]": r.F_max, "굽힘응력 [MPa]": r.sigma / 1e6 if r.sigma else None,
+        "굽힘강도 [MPa]": r.strength / 1e6 if r.strength else None,
+        "여유율": r.margin, "흡수 에너지 [J]": r.E_abs,
+        "h50 [m]": r.h50, "판정": ("-" if r.margin is None else ("유지" if r.margin >= 1 else "파손")),
+    } for r in rows])
+    st.dataframe(df.round(3), width="stretch", hide_index=True)
+    download_df(df, "material_comparison.csv", "dl_materials")
+
+    plot_key = {"여유율": "여유율", "무게 대비 여유율": "여유율", "면밀도(가벼운 순)": "면밀도 [g/cm²]",
+                "판 강성": "판 강성 [kN/m]"}[sort_by]
+    sub = df.dropna(subset=[plot_key])
+    if not sub.empty:
+        fig = go.Figure(go.Bar(x=sub["재료"], y=sub[plot_key],
+                               marker_color=[ACCENT if p == "출력 가능" else GRAYS[2]
+                                             for p in sub["분류"]]))
+        if plot_key == "여유율":
+            fig.add_hline(y=1.0, line=dict(color=GRAYS[1], dash="dash"),
+                          annotation_text="여유율 1 = 굽힘강도 도달")
+        plotly_layout(fig, "", plot_key, 360)
+        st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+
+    missing = [r for r in rows if not r.analyzable]
+    if missing:
+        st.info("굽힘 물성이 미확인이라 충돌 해석을 못 한 재질: "
+                + ", ".join(r.name for r in missing)
+                + " — 면밀도·무게만 비교된다. 제조사 값이나 실측을 사이드바의 '사용자 TDS 입력'으로 넣으면 계산된다.")
+    seen = set()
+    for r in rows:
+        for w in r.warnings:
+            if w.code not in seen:
+                seen.add(w.code)
+                (st.warning if w.severity is Severity.WARNING else st.info)(w.message)
+
+    with st.expander("재료별 출처"):
+        for r in rows:
+            m = MATERIAL_LIBRARY[r.name]
+            st.markdown(f"**{m.name}** — {m.source}")
+            for n in m.notes:
+                st.caption(f"· {n}")
 
 
 # ---------------------------------------------------------------------------
@@ -970,11 +1066,13 @@ def main():
     st.title("군부 겹판 접이식 분할 헬멧 — 낙하 충격 시뮬레이터")
     st.caption("모든 값에 라벨을 붙인다: 문헌값 · 계산값 · 가정 · 미확인 · 보정 후")
     s = sidebar()
-    t1, t2, t3, t4, t5 = st.tabs(["판 충돌", "분할 비교", "헬멧", "보정", "실험 계획"])
+    t1, t2, t6, t3, t4, t5 = st.tabs(["판 충돌", "분할 비교", "재료 비교", "헬멧", "보정", "실험 계획"])
     with t1:
         tab_impact(s)
     with t2:
         tab_compare(s)
+    with t6:
+        tab_materials(s)
     with t3:
         tab_helmet(s)
     with t4:
