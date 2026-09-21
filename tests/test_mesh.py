@@ -100,3 +100,23 @@ def test_projected_area_follows_holes_not_the_hull(tmp_path):
     p = measure(write(trimesh.util.concatenate([a, b]), tmp_path, "two.glb"), scale=1.0)
     assert p.projected == pytest.approx(2 * 0.10 * 0.10, rel=1e-6)   # 볼록껍질이면 0.04 m²
     assert p.projected_method.startswith("정확")
+
+
+def test_closed_shell_perimeter_measures_the_outer_contour(tmp_path):
+    """닫힌 셸을 자르면 바깥·안쪽 루프가 같이 나온다. 둘레를 그냥 합치면 2배가 된다."""
+    outer, inner = sphere(0.100, 4), sphere(0.090, 4)
+    inner.invert()
+    p = measure(write(trimesh.util.concatenate([outer, inner]), tmp_path, "shell.glb"), scale=1.0)
+    assert p.perimeter == pytest.approx(2 * math.pi * 0.100, rel=0.02)     # 합치면 0.60 m 가 된다
+
+
+def test_huge_mesh_falls_back_to_grid_and_agrees_with_the_union(tmp_path, monkeypatch):
+    """삼각형이 많으면 격자 근사로 바꾼다 — 합집합과 1 % 안에서 같아야 한다."""
+    from chiton_sim import mesh as mesh_mod
+
+    m = sphere(0.100, 4)                                   # 5,120 면
+    exact = measure(write(m, tmp_path, "fine.glb"), scale=1.0)
+    monkeypatch.setattr(mesh_mod, "EXACT_UNION_MAX_FACES", 100)
+    grid = measure(write(m, tmp_path, "fine.glb"), scale=1.0)
+    assert exact.projected_method.startswith("정확") and grid.projected_method.startswith("격자")
+    assert grid.projected == pytest.approx(exact.projected, rel=0.01)

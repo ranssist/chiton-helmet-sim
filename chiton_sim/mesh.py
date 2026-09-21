@@ -111,8 +111,26 @@ def load_parts(path: Path):
     return parts
 
 
+def _hull_perimeter(points_2d) -> float:
+    """2D 점들의 볼록껍질 둘레."""
+    from scipy.spatial import ConvexHull, QhullError  # noqa: PLC0415
+    if len(points_2d) < 3:
+        return 0.0
+    try:
+        hull = ConvexHull(points_2d)
+    except QhullError:
+        return 0.0
+    loop = points_2d[np.append(hull.vertices, hull.vertices[0])]
+    return float(np.linalg.norm(np.diff(loop, axis=0), axis=1).sum())
+
+
 def max_horizontal_perimeter(mesh, n: int = 40) -> tuple[float, float]:
-    """수평 단면 둘레의 최대값과 그 높이 (머리둘레 축척용)."""
+    """수평 단면의 '바깥 윤곽' 둘레 최대값과 그 높이 (머리둘레 축척용).
+
+    단면의 길이를 그냥 합하면 안 된다. 닫힌 셸을 자르면 바깥 루프와 안쪽 루프가 같이 나오고,
+    통풍구·레일이 있으면 루프가 더 늘어난다(이 모델에서 실제로 3배 넘게 잡혔다).
+    그래서 단면 점들의 볼록껍질 둘레를 쓴다 = 바깥 윤곽 [가정 A-37].
+    """
     zmin, zmax = mesh.bounds[0][2], mesh.bounds[1][2]
     best, best_z = 0.0, float(zmin)
     for z in np.linspace(zmin + 0.02 * (zmax - zmin), zmax - 0.02 * (zmax - zmin), n):
@@ -122,30 +140,78 @@ def max_horizontal_perimeter(mesh, n: int = 40) -> tuple[float, float]:
             sec = None
         if sec is None:
             continue
-        length = float(np.sum(sec.length)) if np.ndim(sec.length) else float(sec.length)
+        length = _hull_perimeter(np.asarray(sec.vertices)[:, :2])
         if length > best:
             best, best_z = length, float(z)
     return best, best_z
 
 
+def _tri_xy(mesh, lo: int, hi: int):
+    """[lo, hi) 면의 xy 투영 좌표와 투영 면적."""
+    p = np.asarray(mesh.vertices)[np.asarray(mesh.faces)[lo:hi]][:, :, :2]
+    x, y = p[:, :, 0], p[:, :, 1]
+    a = 0.5 * np.abs(x[:, 0] * (y[:, 1] - y[:, 2]) + x[:, 1] * (y[:, 2] - y[:, 0])
+                     + x[:, 2] * (y[:, 0] - y[:, 1]))
+    return p, a
+
+
+def _raster_projected_area(mesh, cells: int = 1500, chunk: int = 400_000) -> tuple[float, float]:
+    """격자를 덮는 방식의 투영 면적. (면적, 셀 한 변)
+
+    삼각형마다 면적에 비례하는 수의 점을 뿌려 격자 칸을 칠하고, 칠해진 칸 수 × 칸 넓이를 센다.
+    삼각형이 수백만 개라 합집합을 그대로 잡을 수 없을 때 쓴다. 테두리 칸을 통째로 세므로
+    실제보다 약간(둘레 × 칸 크기 / 2 정도) 크게 나온다 [가정 A-38].
+    """
+    lo = mesh.bounds[0][:2]
+    span = np.maximum(mesh.bounds[1][:2] - lo, 1e-12)
+    step = float(span.max()) / cells
+    nx, ny = int(np.ceil(span[0] / step)) + 1, int(np.ceil(span[1] / step)) + 1
+    grid = np.zeros((nx, ny), dtype=bool)
+    rng = np.random.default_rng(0)                      # 재현 가능하게 고정
+    n_faces = len(mesh.faces)
+    for start in range(0, n_faces, chunk):
+        p, a = _tri_xy(mesh, start, min(start + chunk, n_faces))
+        pts = p.reshape(-1, 2)                          # 꼭짓점은 항상 찍는다
+        k = np.maximum((4.0 * a / (step * step)).astype(np.int64), 1)
+        idx = np.repeat(np.arange(len(a)), k)
+        u, v = rng.random(len(idx)), rng.random(len(idx))
+        flip = u + v > 1.0
+        u[flip], v[flip] = 1.0 - u[flip], 1.0 - v[flip]
+        tri = p[idx]
+        inside = tri[:, 0] + u[:, None] * (tri[:, 1] - tri[:, 0]) + v[:, None] * (tri[:, 2] - tri[:, 0])
+        ij = ((np.vstack([pts, inside]) - lo) / step).astype(np.int64)
+        np.clip(ij[:, 0], 0, nx - 1, out=ij[:, 0])
+        np.clip(ij[:, 1], 0, ny - 1, out=ij[:, 1])
+        grid[ij[:, 0], ij[:, 1]] = True
+    return float(grid.sum()) * step * step, step
+
+
+# 이보다 삼각형이 많으면 합집합 대신 격자 근사를 쓴다(합집합은 수백만 개에서 사실상 끝나지 않는다).
+EXACT_UNION_MAX_FACES = 200_000
+
+
 def projected_area(mesh) -> tuple[float, str]:
     """위에서 본 투영(그림자) 면적.
 
-    삼각형을 xy 평면에 내리고 합집합을 잡는다. 열린 메시·떨어진 조각·구멍(통풍구)을
-    그대로 반영한다. shapely 가 없으면 볼록껍질로 근사하는데, 그 값은 구멍을 메우므로
-    실제보다 크게 나온다.
+    삼각형을 xy 평면에 내려 합집합을 잡는다. 열린 메시·떨어진 조각·구멍(통풍구)을 그대로
+    반영한다. 삼각형이 너무 많으면 격자 근사로 바꾸고, 둘 다 못 하면 볼록껍질로 근사하는데
+    그 값은 구멍을 메우므로 실제보다 크게 나온다.
     """
-    tri = np.asarray(mesh.triangles)[:, :, :2]
-    x, y = tri[:, :, 0], tri[:, :, 1]
-    a = 0.5 * np.abs(x[:, 0] * (y[:, 1] - y[:, 2]) + x[:, 1] * (y[:, 2] - y[:, 0])
-                     + x[:, 2] * (y[:, 0] - y[:, 1]))
-    tri = tri[a > 1e-12]                       # 옆에서 본 삼각형(선으로 뭉개진 것)은 뺀다
-    try:
-        from shapely.geometry import Polygon  # noqa: PLC0415
-        from shapely.ops import unary_union  # noqa: PLC0415
-        return float(unary_union([Polygon(t) for t in tri]).area), "정확(삼각형 합집합)"
-    except Exception:
-        pass
+    if len(mesh.faces) > EXACT_UNION_MAX_FACES:
+        try:
+            area, step = _raster_projected_area(mesh)
+            return area, f"격자 근사(칸 {step:.4g} — 테두리만큼 조금 크게 나온다)"
+        except MemoryError:  # pragma: no cover - 아주 큰 메시에서만
+            pass
+    else:
+        p, a = _tri_xy(mesh, 0, len(mesh.faces))
+        tri = p[a > 1e-12]                     # 옆에서 본 삼각형(선으로 뭉개진 것)은 뺀다
+        try:
+            from shapely.geometry import Polygon  # noqa: PLC0415
+            from shapely.ops import unary_union  # noqa: PLC0415
+            return float(unary_union([Polygon(t) for t in tri]).area), "정확(삼각형 합집합)"
+        except Exception:
+            pass
     from scipy.spatial import ConvexHull  # noqa: PLC0415
     hull = ConvexHull(mesh.vertices[:, :2])
     return float(hull.volume), "근사(볼록껍질 — 구멍을 메우므로 실제보다 크게 나온다)"

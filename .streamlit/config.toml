@@ -5,3 +5,7 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F5F5F5"
 textColor = "#1A1A1A"
 font = "sans serif"
+
+[server]
+# 3D 모델(STL/GLB)은 수백 MB 가 되기도 한다 (기본 200)
+maxUploadSize = 600
