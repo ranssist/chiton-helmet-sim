@@ -18,3 +18,7 @@ Thumbs.db
 out.txt
 runbat.log
 runbat.err
+
+# 헬멧 3D 모델 (용량이 크다 — models/README.md 만 올린다)
+models/*
+!models/README.md

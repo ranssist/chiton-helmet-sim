@@ -57,6 +57,136 @@ FMVSS218_HEADFORMS = {  # 다른 규격 참고값: FAST SF 시험과 같은 헤�
 
 ARDUINO_SAMPLE_RATE = Quantity(1.0e4, "1/s", Label.LITERATURE, SRC_ARDUINO, "단일 채널 기준")
 
+# --- MICH/ACH 비교 기준 -----------------------------------------------------
+SRC_MSA_ACH = (
+    "MSA Advanced Combat Helmet (ACH) TC-2000 Series 제품 공보 ID 3720-23-MC (2006-03), "
+    "https://media.msanet.com/NA/USA/BallisticProtection/MilitaryHelmets/AdvancedCombatHelmet/3720-23.pdf"
+)
+SRC_PS642 = (
+    "US Army PS Magazine 642 (2006-05) 'ACH Head/Shell Sizing Chart', "
+    "https://www.armyproperty.com/Resources/PS-Mag/2006-05/ACH-Size-Chart.pdf"
+)
+SRC_ARMORSOURCE_GEN2 = (
+    "ArmorSource Next Generation (AR/PD 14-01 Gen II) 제품 페이지, https://armorsource.com/next-gen/"
+)
+
+# MSA 공보의 무게는 셸 단독인지 완성품인지 명시가 없다. 구성품에 패드·끈이 포함되어 있어
+# FAST SF '셸 무게'와 곧바로 비교하면 안 된다 [가정 A-35].
+ACH_MASS_SCOPE = "완성 헬멧 추정(패드·끈 포함 여부 공보에 명시 없음) — FAST SF 셸 무게와 직접 비교 금지"
+FASTSF_MASS_SCOPE = "셸 단독(데이터시트)"
+ACH_GEN2_MASS_SCOPE = "셸+하네스+패드 (풀컷)"
+
+# PS 642 차트는 머리둘레 22.5 in(573 mm), 23.5 in(597 mm)을 경계로 M/L/XL 을 나눈다.
+# 차트에 M 하한과 XL 상한은 없다(길이·폭 측정으로 보완). None = 경계 없음.
+ACH_SIZES = {
+    "M": (None, 0.573),
+    "L": (0.573, 0.597),
+    "XL": (0.597, None),
+}
+ACH_SIZE_NOTE = ("PS 642 는 둘레·길이·폭 셋 중 '가장 큰 치수'로 셸을 고른다. "
+                 "여기서는 둘레 기준만 쓴다")
+ACH_BLUNT_G_LIMIT = Quantity(150.0, "-", Label.LITERATURE, SRC_MSA_ACH,
+                             "‘less than 150 gs force transmitted to the head at 10 fps’")
+ACH_BLUNT_VELOCITY = Quantity(3.048, "m/s", Label.LITERATURE, SRC_MSA_ACH, "10 ft/s")
+ACH_MASSES = {  # MSA 공보: Medium 3.0 lbs, Large 3.25 lbs, XL 3.4 lbs
+    "M": Quantity(1.361, "kg", Label.LITERATURE, SRC_MSA_ACH, "3.0 lbs · " + ACH_MASS_SCOPE),
+    "L": Quantity(1.474, "kg", Label.LITERATURE, SRC_MSA_ACH, "3.25 lbs · " + ACH_MASS_SCOPE),
+    "XL": Quantity(1.542, "kg", Label.LITERATURE, SRC_MSA_ACH, "3.4 lbs · " + ACH_MASS_SCOPE),
+}
+# 아라미드 ACH 셸의 면밀도·커버리지는 공개 규격에서 확인하지 못했다 (PLAN L29)
+ACH_AREAL_DENSITY = unverified("kg/m^2", "ACH 셸 면밀도 — 공개 규격 미확인")  # TODO(source)
+ACH_COVERAGE = unverified("m^2", "ACH 커버리지 면적 — 공개 자료 미확인")  # TODO(source)
+
+ACH_GEN2_AREAL_DENSITY = Quantity(6.9, "kg/m^2", Label.LITERATURE, SRC_ARMORSOURCE_GEN2,
+                                  "AR/PD 14-01 Gen II 요건 'below 6.9 kg/m² (1.38 lbs/ft²)'")
+ACH_GEN2_MASSES = {  # 풀컷, 하네스·패드 포함 상한값
+    "M": Quantity(1.010, "kg", Label.LITERATURE, SRC_ARMORSOURCE_GEN2, "< 1,010 g · " + ACH_GEN2_MASS_SCOPE),
+    "L": Quantity(1.080, "kg", Label.LITERATURE, SRC_ARMORSOURCE_GEN2, "< 1,080 g · " + ACH_GEN2_MASS_SCOPE),
+    "XL": Quantity(1.130, "kg", Label.LITERATURE, SRC_ARMORSOURCE_GEN2, "< 1,130 g · " + ACH_GEN2_MASS_SCOPE),
+}
+
+
+@dataclass(frozen=True)
+class SizeSpec:
+    """규격 한 사이즈의 머리둘레 범위와 기준 무게·커버리지."""
+
+    circ_low: float | None       # m (None = 차트에 하한 없음)
+    circ_high: float | None      # m
+    mass: Quantity               # kg
+    coverage: Quantity           # m²
+    mass_scope: str              # 그 무게가 '무엇'의 무게인지
+
+    @property
+    def circ_mid(self) -> float | None:
+        """축척 기준으로 쓸 대표 머리둘레. 한쪽만 있으면 그 값을 쓴다."""
+        if self.circ_low is not None and self.circ_high is not None:
+            return 0.5 * (self.circ_low + self.circ_high)
+        return self.circ_high if self.circ_high is not None else self.circ_low
+
+
+@dataclass(frozen=True)
+class HelmetStandard:
+    """비교 기준 규격. 값은 전부 출처가 있는 것만 담고, 없으면 미확인으로 둔다."""
+
+    key: str
+    label: str
+    sizes: dict[str, SizeSpec]
+    blunt_g: Quantity
+    blunt_v: Quantity
+    areal_density: Quantity
+    shell_thickness: Quantity
+    source: str
+    note: str = ""
+
+
+HELMET_STANDARDS: dict[str, HelmetStandard] = {
+    "FAST_SF": HelmetStandard(
+        key="FAST_SF", label="Ops-Core FAST SF (하이컷)",
+        sizes={name: SizeSpec(lo, hi,
+                              Quantity(kg, "kg", Label.LITERATURE, SRC_FASTSF,
+                                       f"데이터시트 사이즈 {name} · " + FASTSF_MASS_SCOPE),
+                              Quantity(cov, "m^2", Label.LITERATURE, SRC_FASTSF,
+                                       f"커버리지 사이즈 {name}"),
+                              FASTSF_MASS_SCOPE)
+               for name, (lo, hi, cov, kg) in FASTSF_SIZES.items()},
+        blunt_g=BLUNT_G_LIMIT, blunt_v=BLUNT_VELOCITY,
+        areal_density=FASTSF_AREAL_DENSITY, shell_thickness=FASTSF_SHELL_THICKNESS,
+        source=SRC_FASTSF, note=FASTSF_XXL_NOTE),
+    "ACH": HelmetStandard(
+        key="ACH", label="MICH/ACH TC-2000 (MSA)",
+        sizes={name: SizeSpec(lo, hi, ACH_MASSES[name], ACH_COVERAGE, ACH_MASS_SCOPE)
+               for name, (lo, hi) in ACH_SIZES.items()},
+        blunt_g=ACH_BLUNT_G_LIMIT, blunt_v=ACH_BLUNT_VELOCITY,
+        areal_density=ACH_AREAL_DENSITY,
+        shell_thickness=unverified("m", "ACH 셸 두께 — 공개 자료 미확인"),  # TODO(source)
+        source=SRC_MSA_ACH,
+        note="둔탁 충격 기준(150 g @ 10 ft/s)은 FAST SF 와 같다. " + ACH_SIZE_NOTE),
+    "ACH_GEN2": HelmetStandard(
+        key="ACH_GEN2", label="ACH Gen II (AR/PD 14-01, ArmorSource)",
+        sizes={name: SizeSpec(lo, hi, ACH_GEN2_MASSES[name], ACH_COVERAGE, ACH_GEN2_MASS_SCOPE)
+               for name, (lo, hi) in ACH_SIZES.items()},
+        blunt_g=ACH_BLUNT_G_LIMIT, blunt_v=ACH_BLUNT_VELOCITY,
+        areal_density=ACH_GEN2_AREAL_DENSITY,
+        shell_thickness=unverified("m", "Gen II 셸 두께 — 공개 자료 미확인"),  # TODO(source)
+        source=SRC_ARMORSOURCE_GEN2,
+        note="사이즈 구분은 ACH 와 같다고 본다(제조사가 ACH 호환을 명시). " + ACH_SIZE_NOTE),
+}
+
+
+def standard_warnings(std: HelmetStandard, log: WarningLog | None = None) -> WarningLog:
+    """규격 값을 쓸 때 반드시 같이 보여야 하는 주의."""
+    log = log or WarningLog()
+    if "셸 단독" not in std.sizes[next(iter(std.sizes))].mass_scope:
+        log.add("STD_MASS_SCOPE", Severity.WARNING,
+                f"{std.label} 의 무게는 {std.sizes[next(iter(std.sizes))].mass_scope}. "
+                "이 시뮬레이터의 '셸 질량'은 셸만 센 값이라 같은 선상에서 비교하면 안 된다.")
+    if not std.areal_density.known:
+        log.add("STD_AD_UNKNOWN", Severity.INFO,
+                f"{std.label} 의 면밀도는 공개 자료에서 확인하지 못했다 — 면밀도 등급은 매기지 않는다.")
+    log.add("STD_BALLISTIC", Severity.INFO,
+            "규격 수치는 치수·무게·시험 조건 비교용이다. 방탄 성능은 이 모델의 범위 밖이다.")
+    return log
+
 
 # ---------------------------------------------------------------------------
 # 무게·면밀도

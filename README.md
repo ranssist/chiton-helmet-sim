@@ -71,7 +71,7 @@ PYTHONPATH=. .venv/Scripts/python scripts/make_virtual_data.py
 | `chiton_sim/segments.py` | 구성×타격 위치, 응력집중, 면밀도, 같은 두께/같은 면밀도 |
 | `chiton_sim/failure.py` | 참고 판정, 주 판정 E_c(t) = C·tⁿ, 몬테카를로 |
 | `chiton_sim/calibration.py` | CSV 스키마, 관 손실·p_y 적합, Bruceton, 로지스틱, 손실률, 점토 검사 |
-| `chiton_sim/helmet.py` | 셸 무게·면밀도, 헤드폼 1자유도, 측정 가능성 |
+| `chiton_sim/helmet.py` | 셸 무게·면밀도, 비교 규격(FAST SF·MICH/ACH), 헤드폼 1자유도, 측정 가능성 |
 | `chiton_sim/planner.py` | 동일 에너지 조합, 계단법 도우미, 시편 수, 곡면 확인 |
 | `chiton_sim/compare.py` | 재료 비교(같은 두께/같은 면밀도), 순위 |
 | `chiton_sim/grading.py` | A~F 등급 (절대 기준선 / 상대 순위) |
@@ -107,6 +107,8 @@ PYTHONPATH=. .venv/Scripts/python scripts/make_virtual_data.py
 | PLA 푸아송비 | TDS에 없음 → 0.36 가정 (PETG 0.40, 복합재 0.30 도 가정) |
 | UHMWPE 적층판 굽힘강도 | 문헌은 면내 인장(3.1 GPa)만 제시 → 굽힘 파손 기준 아님, 실측 입력 필요 |
 | FAST SF 셸 굽힘 물성 | 제조사 비공개 → 무게·면밀도 비교만 가능 |
+| 원본 ACH 셸 면밀도·커버리지 | 공개 규격 문서 미확보 → 면밀도 등급 없음. ACH Gen II(6900 g/m²)로 대체 비교 |
+| ACH 공보 무게의 범위(셸/완성품) | 공보에 명시 없음 → '완성 헬멧 추정'으로 표시하고 경고 |
 
 ---
 
@@ -214,6 +216,23 @@ Hertz 곡선이다. `p_y` 초기값은 1.6·Y(Y는 굽힘강도 대용값)이고
 - **설정 저장·불러오기**: 현재 설정을 JSON 으로 내려받아 친구에게 보내면 같은 조건이 그대로 재현된다
 - 모든 값 옆에 라벨이 붙고, 적용범위를 벗어나면 경고가 뜬다
 
+### 비교 규격 (FAST SF / MICH·ACH)
+
+사이드바 **"등급 기준 (A~F)" → 비교 규격**에서 고른다. 사이즈·무게·면밀도·둔탁 충격 기준선이 전부 그 규격을 따라간다.
+
+| 규격 | 사이즈(머리둘레) | 기준 무게 | 면밀도 | 둔탁 충격 |
+|---|---|---|---|---|
+| Ops-Core FAST SF | M 53–56 · L 56–59 · XL 59–62 · XXL 62–64.5 cm | 셸 단독 630/655/750/780 g | 5957 g/m² | 150 g @ 10 ft/s |
+| MICH/ACH TC-2000 (MSA) | M ≤57.3 · L 57.3–59.7 · XL ≥59.7 cm | **완성 헬멧 추정** 1361/1474/1542 g | 미확인 | 150 g @ 10 ft/s |
+| ACH Gen II (AR/PD 14-01) | ACH 와 같음 | 셸+하네스+패드 <1010/1080/1130 g | 6900 g/m² | 150 g @ 10 ft/s |
+
+주의 두 가지.
+
+- **무게의 범위가 다르다.** FAST SF 값은 셸만, MSA 공보 값은 패드·끈 포함 여부가 명시되지 않은 완성품 수치다. 시뮬레이터의 '셸 질량'과 같은 축에 놓고 비교하면 안 되며, 규격을 고르면 그 경고가 화면에 뜬다.
+- **원본 ACH 의 셸 면밀도·커버리지는 공개 자료에서 확인하지 못했다.** 그래서 ACH 를 고르면 면밀도 등급이 `-` 로 나온다(추정값을 만들어 넣지 않는다). 아라미드 계열 기준선이 필요하면 ACH Gen II 를 쓴다.
+
+둔탁 충격 기준은 세 규격이 같다 — **머리에 전달되는 가속도 150 g 이하 @ 10 ft/s(3.048 m/s)**.
+
 ### 3D 모델(Meshy 등) 적용
 
 헬멧 탭 맨 위 **"3D 모델에서 치수 불러오기"** 에 파일을 올리면 시뮬레이터 입력이 채워진다.
@@ -294,6 +313,9 @@ result, failure_mode, dent_mm, bfd_mm, clay_cal_mm`
 
 ## 참고문헌
 
+- MSA, *Advanced Combat Helmet (ACH) — TC 2000 Series* 제품 공보 ID 3720-23-MC (2006-03) — https://media.msanet.com/NA/USA/BallisticProtection/MilitaryHelmets/AdvancedCombatHelmet/3720-23.pdf
+- US Army, *PS Magazine* 642 (2006-05), ACH Head/Shell Sizing Chart — https://www.armyproperty.com/Resources/PS-Mag/2006-05/ACH-Size-Chart.pdf
+- ArmorSource, *Next Generation* (AR/PD 14-01 Gen II) — https://armorsource.com/next-gen/
 - Bambu Lab, PLA Basic Technical Data Sheet V3.0 — https://wiki.bambulab.com/filament-acc/abs-asa-pc/bambu_pla_basic_technical_data_sheet.pdf
 - F.A. Morrison, *Data Correlation for Drag Coefficient for Sphere* (2016) / *An Introduction to Fluid Mechanics*, Cambridge UP (2013) — https://pages.mtu.edu/~fmorriso/DataCorrelationForSphereDrag2016.pdf
 - A. He & J.S. Wettlaufer, *Hertz beyond expectations*, arXiv:1306.4952 (2013)

@@ -31,8 +31,8 @@ from chiton_sim.grading import (
     grade, h50_scale, margin_scale, measurement_scale, overall, relative_grades, shell_mass_scale,
 )
 from chiton_sim.helmet import (
-    BLUNT_G_LIMIT, BLUNT_VELOCITY, FASTSF_AREAL_DENSITY, FASTSF_SHELL_L_DATASHEET,
-    FASTSF_SHELL_L_NEXTGEN, FASTSF_SIZES, FASTSF_XXL_NOTE, FMVSS218_HEADFORMS, LinerModel,
+    FASTSF_SHELL_L_NEXTGEN, FASTSF_SIZES, FASTSF_XXL_NOTE, FMVSS218_HEADFORMS, HELMET_STANDARDS,
+    LinerModel, standard_warnings,
     measurement_check, required_spread_area, segmented_spread_area, shell_areal_density,
     shell_mass, simulate_headform, thickness_for_mass,
 )
@@ -113,6 +113,16 @@ def current_cuts():
             ss.get("cutE", DEFAULT_CUTS[4]))
 
 
+def current_std():
+    """사이드바에서 고른 비교 규격."""
+    return HELMET_STANDARDS[st.session_state.get("std_key", "FAST_SF")]
+
+
+def std_areal_density():
+    """면밀도 기준선. 규격에 공개값이 없으면 미확인이 그대로 나가 등급이 '-' 가 된다."""
+    return current_std().areal_density
+
+
 GRADE_COLOR = {"A": "#1B7F3B", "B": "#4C9A2A", "C": "#B58A00", "D": "#C2410C",
                "E": "#B3261E", "F": "#7A1B14", "-": "#888888"}
 
@@ -153,6 +163,7 @@ DEFAULTS = {
     "target_mass_g": 557.0, "target_h_m": 2.0,
     "h_area_cm2": 0.0, "h_proj_cm2": 0.0, "h_t_mm": 4.0, "h_r_ov": 0.15,
     "h_plate_cm2": 120.0, "h_f_mono": 0.25, "mesh_head_cm": 57.5,
+    "std_key": "FAST_SF", "helmet_size": "L",
 }
 PRESETS = {
     "낙하탑 1.5 m": {"height": 1.5, "use_tube": True, "tube_mode": "직접 입력", "tube_len": 1.5,
@@ -326,6 +337,10 @@ def sidebar():
             st.slider("p_y / Y", 1.6, 3.0, key="py_ratio", step=0.1, label_visibility="collapsed")
 
         with st.expander("등급 기준 (A~F)"):
+            st.selectbox("비교 규격", list(HELMET_STANDARDS), key="std_key",
+                         format_func=lambda k: HELMET_STANDARDS[k].label,
+                         help="무게·면밀도·사이즈의 기준선을 이 규격에서 가져온다")
+            st.caption(f"출처: {HELMET_STANDARDS[ss.get('std_key', 'FAST_SF')].source}")
             st.caption("점수 = 기준선 대비 여유(1.0 = 기준 충족). 경계값은 문헌 근거가 없는 가정이라 "
                        "여기서 바꿀 수 있고, 표에는 항상 원래 수치와 기준선을 같이 보여 준다.")
             c1, c2 = st.columns(2)
@@ -529,7 +544,7 @@ def tab_impact(s):
     ad_val = areal_density(mat.density.require("밀도"), cfg.thickness, overlap_ratio(cfg).value or 0.0)
     target_h = assumed(st.session_state.get("target_h_m", 2.0), "m", "목표 임계 높이(사용자)")
     g_h50 = grade(h50_val, h50_scale(target_h, cuts))
-    g_ad = grade(ad_val, areal_density_scale(FASTSF_AREAL_DENSITY, cuts))
+    g_ad = grade(ad_val, areal_density_scale(std_areal_density(), cuts))
     g_all = overall([g_margin, g_h50, g_ad], min_known=2)
 
     st.markdown("##### 등급")
@@ -709,6 +724,15 @@ def tab_compare(s):
 # ---------------------------------------------------------------------------
 # 탭 3 — 헬멧
 # ---------------------------------------------------------------------------
+def circ_text(spec) -> str:
+    """머리둘레 범위 표기. 차트에 경계가 없는 쪽은 부등호로 적는다."""
+    lo = f"{units.m_to_cm(spec.circ_low):.1f}" if spec.circ_low is not None else None
+    hi = f"{units.m_to_cm(spec.circ_high):.1f}" if spec.circ_high is not None else None
+    if lo and hi:
+        return f"{lo}–{hi} cm"
+    return f"{hi} cm 이하" if hi else f"{lo} cm 이상"
+
+
 MESH_NOTE = """이 기능은 **형상 치수만** 읽는다. 메시 위에서 응력을 푸는 FEA 가 아니고,
 곡률 효과는 모델에 없다(평판 가정) — 곡률 반경은 참고값으로만 적는다.
 Meshy 같은 생성형 모델에는 실제 치수가 없으므로 **축척을 반드시 지정**한다.
@@ -734,9 +758,19 @@ def mesh_panel() -> None:
                         key="mesh_scale_mode")
         kw: dict = {}
         if mode.startswith("머리둘레"):
+            std = current_std()
+            pc1, pc2 = c1.columns([3, 2])
+            psize = pc1.selectbox("규격 프리셋", list(std.sizes), key="mesh_preset_size",
+                                  help=f"{std.label} — 사이드바 '등급 기준'에서 규격을 바꾼다")
+            if pc2.button("적용", key="mesh_preset_apply"):
+                mid = std.sizes[psize].circ_mid
+                if mid:
+                    st.session_state["mesh_head_cm"] = round(units.m_to_cm(mid), 1)
+                    st.rerun()
+            c1.caption(f"{std.label} {psize}: 머리둘레 {circ_text(std.sizes[psize])}")
             kw["target_circumference"] = units.cm_to_m(c2.number_input(
                 "머리둘레 [cm]", 40.0, 80.0, key="mesh_head_cm", step=0.5,
-                help="FAST SF: M 54–57, L 56–59 cm"))
+                help="규격 프리셋을 쓰거나 직접 잰 값을 넣는다"))
             k1, k2 = c2.columns(2)
             kw["liner"] = units.mm_to_m(k1.number_input(
                 "라이너 두께 [mm]", 0.0, 60.0, 20.0, 1.0, key="mesh_liner_mm",
@@ -827,10 +861,17 @@ def tab_helmet(s):
     mat = s["material"]
     mesh_panel()
     st.markdown("#### 셸 무게·면밀도")
+    std = current_std()
     c1, c2, c3, c4 = st.columns(4)
-    size = c1.selectbox("사이즈 (FAST SF 기준)", list(FASTSF_SIZES), index=1)
-    lo, hi, cov, shell_kg = FASTSF_SIZES[size]
-    c1.caption(f"머리둘레 {lo*100:.0f}–{hi*100:.1f} cm [문헌값]" + (f" · {FASTSF_XXL_NOTE}" if size == "XXL" else ""))
+    opts = list(std.sizes)
+    idx = opts.index(st.session_state.get("helmet_size")) if st.session_state.get("helmet_size") in opts else 0
+    size = c1.selectbox(f"사이즈 ({std.label} 기준)", opts, index=idx)
+    st.session_state["helmet_size"] = size
+    spec = std.sizes[size]
+    cov = spec.coverage.value if spec.coverage.known else FASTSF_SIZES["L"][2]
+    c1.caption(f"머리둘레 {circ_text(spec)} [문헌값]"
+               + (f" · {FASTSF_XXL_NOTE}" if std.key == "FAST_SF" and size == "XXL" else "")
+               + (f" · {std.note}" if std.note and std.key != "FAST_SF" else ""))
     a_cm2 = c2.number_input("셸 표면적 A [cm²] (CAD·메시, 0 = 미입력)", 0.0, 5000.0,
                             step=10.0, key="h_area_cm2")
     t_mm = c3.number_input("셸 두께 [mm]", 0.5, 20.0, step=0.1, key="h_t_mm")
@@ -845,24 +886,30 @@ def tab_helmet(s):
         cc = st.columns(4)
         cc[0].metric("셸 질량", f"{units.kg_to_g(m.value):.0f} g", f"[{m.label.value}]")
         cc[1].metric("면밀도", f"{units.kg_m2_to_g_cm2(ad.value):.4f} g/cm²")
-        cc[2].metric("FAST SF L 셸", f"{units.kg_to_g(FASTSF_SHELL_L_NEXTGEN.value):.0f} / "
-                                     f"{units.kg_to_g(FASTSF_SHELL_L_DATASHEET.value):.0f} g", "차세대 / 데이터시트")
-        cc[3].metric("FAST SF 면밀도", f"{units.kg_m2_to_g_cm2(FASTSF_AREAL_DENSITY.value):.4f} g/cm²")
-        fig = go.Figure(go.Bar(x=["이 설계", "FAST SF 차세대 L", "FAST SF 데이터시트 L"],
-                               y=[units.kg_to_g(m.value), units.kg_to_g(FASTSF_SHELL_L_NEXTGEN.value),
-                                  units.kg_to_g(FASTSF_SHELL_L_DATASHEET.value)],
+        cc[2].metric(f"{std.label} {size}", f"{units.kg_to_g(spec.mass.value):.0f} g",
+                     spec.mass_scope[:22])
+        cc[3].metric(f"{std.label} 면밀도",
+                     f"{units.kg_m2_to_g_cm2(std.areal_density.value):.4f} g/cm²"
+                     if std.areal_density.known else "미확인")
+        fig = go.Figure(go.Bar(x=["이 설계(셸)", f"{std.label} {size}", "FAST SF 차세대 L 셸"],
+                               y=[units.kg_to_g(m.value), units.kg_to_g(spec.mass.value),
+                                  units.kg_to_g(FASTSF_SHELL_L_NEXTGEN.value)],
                                marker_color=[ACCENT, GRAYS[2], GRAYS[3]]))
         plotly_layout(fig, "", "셸 질량 [g]", 300)
         st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
+        st.caption(f"막대 비교 주의 — 가운데 값은 {spec.mass_scope}, 왼쪽은 셸만 센 값이다. "
+                   f"출처: {spec.mass.note} ({spec.mass.label.value})")
         tgt = st.number_input("목표 셸 무게 [g] → 허용 두께 역산", 100.0, 2000.0, 557.0, 1.0,
                               key="h_target_g")
         t_allow = thickness_for_mass(rho.value, area, units.g_to_kg(tgt), r_ov)
         st.caption(f"허용 두께 {units.m_to_mm(t_allow.value):.2f} mm [{t_allow.label.value}]")
     else:
         st.warning("셸 표면적(CAD)이 미확인이라 무게를 계산하지 않는다.")
+    show_warnings(standard_warnings(std))
 
     st.markdown("---")
-    st.markdown(f"#### 헤드폼 둔탁 충격 (기준 {BLUNT_G_LIMIT.value:.0f} g @ 10 ft/s = {BLUNT_VELOCITY.value:.3f} m/s)")
+    st.markdown(f"#### 헤드폼 둔탁 충격 (기준 {std.blunt_g.value:.0f} g @ "
+                f"{std.blunt_v.value:.3f} m/s · {std.label})")
     h1, h2, h3 = st.columns(3)
     preset = h1.selectbox("헤드폼 질량", ["(직접 입력)"] + list(FMVSS218_HEADFORMS))
     if preset == "(직접 입력)":
@@ -921,7 +968,7 @@ def tab_helmet(s):
     m3.metric("펄스 길이(압축)", f"{r.pulse_duration*1e3:.2f} ms")
     m4.metric("s_min = v²/2a", f"{r.s_min*1e3:.2f} mm", "검산용 이상 한계")
     cuts = current_cuts()
-    g_acc = grade(r.a_max_g, blunt_g_scale(BLUNT_G_LIMIT, cuts))
+    g_acc = grade(r.a_max_g, blunt_g_scale(std.blunt_g, cuts))
     g_stroke = grade(r.stroke, bottoming_scale(
         computed(liner.usable_stroke, "m", "사용 가능 스트로크"), cuts))
     gcols = st.columns(3)
@@ -931,6 +978,8 @@ def tab_helmet(s):
         g_mass_h = grade(shell_mass(rho.value, area, units.mm_to_m(t_mm), r_ov).value,
                          shell_mass_scale(assumed(units.g_to_kg(
                              st.session_state.get("target_mass_g", 557.0)), "kg", "목표(사용자)"), cuts))
+        gcols[2].caption(f"기준은 사이드바의 목표 무게다. {std.label} {size} 값은 "
+                         f"{spec.mass_scope} 라 직접 비교하지 않는다.")
         show_grade(gcols[2], "셸 무게 등급", g_mass_h)
     else:
         gcols[2].caption("셸 무게 등급: 표면적 A 미입력")
@@ -942,8 +991,8 @@ def tab_helmet(s):
 
     fig = go.Figure(go.Scatter(x=r.t * 1e3, y=r.a_g, mode="lines", name="헤드폼 가속도",
                                line=dict(color=ACCENT)))
-    fig.add_hline(y=BLUNT_G_LIMIT.value, line=dict(color=GRAYS[1], dash="dash"),
-                  annotation_text="150 g 기준")
+    fig.add_hline(y=std.blunt_g.value, line=dict(color=GRAYS[1], dash="dash"),
+                  annotation_text=f"{std.blunt_g.value:.0f} g 기준 ({std.label})")
     plotly_layout(fig, "시간 [ms]", "가속도 [g]")
     st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
     show_warnings(r.warnings)
@@ -1012,7 +1061,8 @@ def tab_materials(s):
                           "목표 셸 무게(사용자)")
     target_h = assumed(st.session_state.get("target_h_m", 2.0), "m", "목표 임계 높이(사용자)")
     g_margin = [grade(r.margin, margin_scale(cuts)) for r in rows]
-    g_ad = [grade(r.areal_density, areal_density_scale(FASTSF_AREAL_DENSITY, cuts)) for r in rows]
+    ad_anchor = std_areal_density()
+    g_ad = [grade(r.areal_density, areal_density_scale(ad_anchor, cuts)) for r in rows]
     g_mass = [grade(r.shell_mass, shell_mass_scale(target_mass, cuts)) for r in rows]
     g_h50 = [grade(r.h50, h50_scale(target_h, cuts)) for r in rows]
     g_k = relative_grades([r.k_bending for r in rows], "high", "판 강성")
@@ -1041,7 +1091,10 @@ def tab_materials(s):
     st.dataframe(styled, width="stretch", hide_index=True)
     st.caption(
         "등급 기준 — 여유율: 응력 = 굽힘강도인 물리적 경계 [계산값] · "
-        f"면밀도: FAST SF {units.kg_m2_to_g_cm2(FASTSF_AREAL_DENSITY.value)*1e4:.0f} g/m² [문헌값] · "
+        f"면밀도: {current_std().label} "
+        + (f"{units.kg_m2_to_g_cm2(ad_anchor.value)*1e4:.0f} g/m² [{ad_anchor.label.value}] · "
+           if ad_anchor.known else "면밀도 미확인 → 등급 없음 · ")
+        + 
         f"무게: 목표 {st.session_state.get('target_mass_g', 557.0):.0f} g [가정] · "
         f"h50: 목표 {st.session_state.get('target_h_m', 2.0):.2f} m [가정] · "
         f"강성: 비교 대상 안 순위(절대 기준 없음). {cuts_note(cuts)}")
