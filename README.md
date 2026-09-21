@@ -218,7 +218,7 @@ Hertz 곡선이다. `p_y` 초기값은 1.6·Y(Y는 굽힘강도 대용값)이고
 
 헬멧 탭 맨 위 **"3D 모델에서 치수 불러오기"** 에 파일을 올리면 시뮬레이터 입력이 채워진다.
 
-1. 설치(한 번만): `.venv/Scripts/pip install -r requirements-mesh.txt`
+1. 필요한 패키지: `run.bat`(또는 `run.sh`)가 처음 실행될 때 자동으로 깔린다. 이미 환경을 만든 뒤라면 한 번만 `.venv/Scripts/pip install -r requirements-mesh.txt`
 2. 파일 형식: `glb` · `gltf` · `obj` · `stl` · `ply` · `off` · `3mf`  (Meshy 는 **GLB 로 내보내기**가 제일 무난하다. FBX·USDZ 는 GLB 로 변환한다.)
 3. **축척을 반드시 지정한다.** 생성형 3D 모델에는 실제 치수가 없다.
    - 머리둘레 기준(권장): 머리둘레 + 라이너 두께 + 셸 두께 → 셸 바깥 둘레 = 머리둘레 + 2π(라이너+셸)

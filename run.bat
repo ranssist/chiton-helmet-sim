@@ -22,6 +22,8 @@ if not exist ".venv\Scripts\streamlit.exe" (
         pause
         exit /b 1
     )
+    REM 3D 모델 기능용 선택 패키지. 실패해도 앱은 돌아간다.
+    ".venv\Scripts\python.exe" -m pip install -r requirements-mesh.txt --quiet
 )
 
 echo [2/2] 앱을 켭니다. 브라우저가 자동으로 열립니다.
