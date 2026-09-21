@@ -50,9 +50,13 @@ chiton_sim/failure.py     참고 판정, 주 판정 E_c(t)=C·tⁿ, 벡터화 �
 chiton_sim/calibration.py CSV 스키마·정규화, 판정기준 저장, 관손실·p_y·판강성 적합, Bruceton, 로지스틱, 손실률, 접힘추세, 점토
 chiton_sim/helmet.py      셸 무게·면밀도·역산, 헤드폼 1자유도, 설계 창, 측정 가능성
 chiton_sim/planner.py     동일 에너지 2조합, Fisher 검정, 계단법 도우미, 시편 수, 곡면 확인
-app.py                    Streamlit UI 5탭(판 충돌/분할 비교/헬멧/보정/실험 계획)
+chiton_sim/compare.py     재료 비교(같은 두께/같은 면밀도), 임계 높이 h50
+chiton_sim/grading.py     A~F 등급(절대 기준선/상대 순위), 종합 등급
+chiton_sim/mesh.py        3D 메시 → 표면적·투영면적·두께·분할판 면적 (선택: trimesh·shapely)
+app.py                    Streamlit UI 6탭(판 충돌/분할 비교/재료 비교/헬멧/보정/실험 계획)
+                          헬멧 탭 맨 위에 3D 모델 업로드 → 입력 자동 채움
 scripts/make_virtual_data.py  가상 CSV 생성   scripts/error_budget.py  오차 예산 재계산
-tests/                    pytest 100건        docs/error_budget.md  오차 분석
+tests/                    pytest 124건        docs/error_budget.md  오차 분석
 ```
 
 ### 4. 물리 모델 (구현된 식 전부)
@@ -96,7 +100,7 @@ Kt 초기값 1.87 (NACA TN-740), 보정 시 `Kt_eff = √(E50_center/E50_site)`.
 
 ### 5. 검증 상태 (건드리면 깨지는 것들)
 
-`pytest` 100건 통과(약 70초). 문헌 대조가 테스트에 박혀 있다.
+`pytest` 124건 통과(약 90초). 문헌 대조가 테스트에 박혀 있다.
 - Hertz `tc`·`F_max`가 McLaskey & Glaser(2010) JASA 128:1087 식 (4)·(6)과 0.3 % 이내
 - Thornton 수치 적분이 Thornton(1997) 반발계수 닫힌 해(Jackson 외 2010 식 2)와 0.5 % 이내
 - Shivakumar NASA TM-85703 Fig. 7(Al 판 a=38, h=3.2 mm, 강구 R=19 mm, 2.54 m/s → 0.607 ms) ±10 %

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,7 @@ from chiton_sim.helmet import (
     shell_mass, simulate_headform, thickness_for_mass,
 )
 from chiton_sim.impact import IMPULSE_NOTE
+from chiton_sim.mesh import SUPPORTED_SUFFIXES
 from chiton_sim.compare import compare_materials, critical_height, rank
 from chiton_sim.materials import (
     BAMBU_PLA_BASIC, EPP_ARPRO_TABLE, EPP_NOTE, MATERIAL_LIBRARY, epp_stress, material_warnings,
@@ -149,6 +151,8 @@ DEFAULTS = {
     "cutA": DEFAULT_CUTS[0], "cutB": DEFAULT_CUTS[1], "cutC": DEFAULT_CUTS[2],
     "cutD": DEFAULT_CUTS[3], "cutE": DEFAULT_CUTS[4],
     "target_mass_g": 557.0, "target_h_m": 2.0,
+    "h_area_cm2": 0.0, "h_proj_cm2": 0.0, "h_t_mm": 4.0, "h_r_ov": 0.15,
+    "h_plate_cm2": 120.0, "h_f_mono": 0.25, "mesh_head_cm": 57.5,
 }
 PRESETS = {
     "낙하탑 1.5 m": {"height": 1.5, "use_tube": True, "tube_mode": "직접 입력", "tube_len": 1.5,
@@ -705,18 +709,134 @@ def tab_compare(s):
 # ---------------------------------------------------------------------------
 # 탭 3 — 헬멧
 # ---------------------------------------------------------------------------
+MESH_NOTE = """이 기능은 **형상 치수만** 읽는다. 메시 위에서 응력을 푸는 FEA 가 아니고,
+곡률 효과는 모델에 없다(평판 가정) — 곡률 반경은 참고값으로만 적는다.
+Meshy 같은 생성형 모델에는 실제 치수가 없으므로 **축척을 반드시 지정**한다.
+FBX·USDZ 는 Meshy 에서 GLB 로 내보내면 읽는다."""
+
+
+def mesh_panel() -> None:
+    """3D 모델(GLB 등)에서 표면적·투영면적·두께·분할판 면적을 읽어 입력칸에 넣는다."""
+    with st.expander("3D 모델에서 치수 불러오기 (Meshy 등)", expanded=False):
+        st.caption(MESH_NOTE)
+        try:
+            from chiton_sim.mesh import MeshDependencyError, measure
+        except ImportError:
+            st.error("메시 기능에 필요한 패키지가 없다: "
+                     "`.venv/Scripts/pip install -r requirements-mesh.txt`")
+            return
+
+        up = st.file_uploader("헬멧 메시 파일", key="mesh_file",
+                              type=[x.lstrip(".") for x in SUPPORTED_SUFFIXES])
+        path_txt = st.text_input("또는 파일 경로 (업로드가 안 될 때)", "", key="mesh_path")
+        c1, c2 = st.columns([2, 3])
+        mode = c1.radio("축척 기준", ["머리둘레 [cm]", "좌우 폭 [mm]", "배율(직접)", "지정 안 함"],
+                        key="mesh_scale_mode")
+        kw: dict = {}
+        if mode.startswith("머리둘레"):
+            kw["target_circumference"] = units.cm_to_m(c2.number_input(
+                "머리둘레 [cm]", 40.0, 80.0, key="mesh_head_cm", step=0.5,
+                help="FAST SF: M 54–57, L 56–59 cm"))
+            k1, k2 = c2.columns(2)
+            kw["liner"] = units.mm_to_m(k1.number_input(
+                "라이너 두께 [mm]", 0.0, 60.0, 20.0, 1.0, key="mesh_liner_mm",
+                help="머리둘레 → 셸 바깥 둘레 보정용"))
+            kw["shell"] = units.mm_to_m(k2.number_input(
+                "셸 두께 [mm]", 0.0, 20.0, 4.0, 0.5, key="mesh_shell_mm"))
+        elif mode.startswith("좌우"):
+            kw["target_width"] = units.mm_to_m(c2.number_input(
+                "좌우 최대 폭 [mm]", 50.0, 500.0, 250.0, 1.0, key="mesh_width_mm"))
+        elif mode.startswith("배율"):
+            kw["scale"] = c2.number_input("곱할 배율", 1e-4, 1e4, 0.001, format="%.5f",
+                                          key="mesh_scale_factor",
+                                          help="파일 단위가 mm 면 0.001, cm 면 0.01")
+        else:
+            c2.warning("축척 없이는 면적·두께가 의미 없다. 참고용으로만 본다.")
+
+        if st.button("치수 읽기", key="mesh_read", type="primary"):
+            src = None
+            if up is not None:
+                tmp = Path(tempfile.mkdtemp(prefix="chiton_mesh_")) / up.name
+                tmp.write_bytes(up.getbuffer())
+                src = tmp
+            elif path_txt.strip():
+                src = Path(path_txt.strip().strip('"'))
+                if not src.exists():
+                    st.error(f"파일이 없다: {src}")
+                    src = None
+            else:
+                st.error("파일을 올리거나 경로를 입력한다.")
+            if src is not None:
+                try:
+                    with st.spinner("메시를 읽는 중… (삼각형이 많으면 수십 초)"):
+                        st.session_state["mesh_props"] = measure(src, **kw)
+                    st.session_state.pop("mesh_applied", None)
+                except MeshDependencyError as exc:
+                    st.error(str(exc))
+                except Exception as exc:                      # 형식·손상 등 읽기 실패
+                    st.error(f"메시를 읽지 못했다: {exc}")
+
+        p = st.session_state.get("mesh_props")
+        if p is None:
+            return
+
+        st.markdown(f"**{p.name}** · 조각 {p.n_parts}개 · 삼각형 {p.n_faces:,}개 · {p.scale_how}")
+        st.caption("경계 상자 "
+                   f"{units.m_to_cm(p.bbox[0]):.1f} × {units.m_to_cm(p.bbox[1]):.1f} × "
+                   f"{units.m_to_cm(p.bbox[2]):.1f} cm · "
+                   f"최대 수평 둘레 {units.m_to_cm(p.perimeter):.1f} cm · 닫힌 메시 {p.watertight}")
+        rows = [
+            {"항목": "셸 표면적 A", "값": f"{units.m2_to_cm2(p.area_outer):.0f} cm²",
+             "라벨": p.area_q.label.value, "쓰임": "셸 무게·면밀도"},
+            {"항목": "투영 면적", "값": f"{units.m2_to_cm2(p.projected):.0f} cm²",
+             "라벨": p.projected_method, "쓰임": "A_spread = 투영면적 × f"},
+            {"항목": "셸 두께 추정",
+             "값": "불가" if p.thickness_est is None else f"{units.m_to_mm(p.thickness_est):.2f} mm",
+             "라벨": p.thickness_q.label.value, "쓰임": "무게·면밀도"},
+            {"항목": f"분할판 1장 면적 (조각 {p.n_segments}개)",
+             "값": "불가" if p.n_segments < 2 else f"{units.m2_to_cm2(p.segment_areas[0]):.0f} cm²",
+             "라벨": p.segment_area_q.label.value, "쓰임": "분할형 A_spread"},
+            {"항목": "이음선 길이", "값": f"{units.m_to_cm(p.seam_length):.1f} cm",
+             "라벨": Label.COMPUTED.value, "쓰임": "겹침 면적비 참고"},
+            {"항목": "곡률 반경(구 근사)", "값": f"{units.m_to_cm(p.sphere_radius):.1f} cm",
+             "라벨": Label.ASSUMPTION.value, "쓰임": "참고 — 모델에 곡률 효과 없음"},
+        ]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        show_warnings(p.warnings)
+
+        blocked = "MESH_NO_SCALE" in p.warnings.codes()
+        if st.button("이 값을 헬멧 입력에 적용", key="mesh_apply", disabled=blocked,
+                     help="축척을 지정해야 적용할 수 있다" if blocked else None):
+            applied = ["표면적 A", "투영 면적"]
+            st.session_state["h_area_cm2"] = round(units.m2_to_cm2(p.area_outer), 1)
+            st.session_state["h_proj_cm2"] = round(units.m2_to_cm2(p.projected), 1)
+            if p.thickness_est is not None:
+                st.session_state["h_t_mm"] = round(units.m_to_mm(p.thickness_est), 2)
+                applied.append("셸 두께")
+            if p.n_segments > 1:
+                st.session_state["h_plate_cm2"] = round(units.m2_to_cm2(p.segment_areas[0]), 1)
+                applied.append("판 1장 면적")
+            st.session_state["mesh_applied"] = ", ".join(applied)
+            st.rerun()
+        if st.session_state.get("mesh_applied"):
+            st.success(f"적용됨: {st.session_state['mesh_applied']} "
+                       "(아래 입력칸에서 그대로 고칠 수 있다)")
+
+
 def tab_helmet(s):
     mat = s["material"]
+    mesh_panel()
     st.markdown("#### 셸 무게·면밀도")
     c1, c2, c3, c4 = st.columns(4)
     size = c1.selectbox("사이즈 (FAST SF 기준)", list(FASTSF_SIZES), index=1)
     lo, hi, cov, shell_kg = FASTSF_SIZES[size]
     c1.caption(f"머리둘레 {lo*100:.0f}–{hi*100:.1f} cm [문헌값]" + (f" · {FASTSF_XXL_NOTE}" if size == "XXL" else ""))
-    a_cm2 = c2.number_input("셸 표면적 A [cm²] (CAD 실측, 0 = 미입력)", 0.0, 5000.0, 0.0, 10.0)
-    t_mm = c3.number_input("셸 두께 [mm]", 0.5, 20.0, 4.0, 0.1)
-    r_ov = c4.number_input("겹침 면적비", 0.0, 1.0, 0.15, 0.01)
-    area = computed(units.cm2_to_m2(a_cm2), "m^2", "CAD 입력") if a_cm2 > 0 else unverified(
-        "m^2", "CAD 실측 미입력")
+    a_cm2 = c2.number_input("셸 표면적 A [cm²] (CAD·메시, 0 = 미입력)", 0.0, 5000.0,
+                            step=10.0, key="h_area_cm2")
+    t_mm = c3.number_input("셸 두께 [mm]", 0.5, 20.0, step=0.1, key="h_t_mm")
+    r_ov = c4.number_input("겹침 면적비", 0.0, 1.0, step=0.01, key="h_r_ov")
+    area = computed(units.cm2_to_m2(a_cm2), "m^2", "CAD·메시 입력") if a_cm2 > 0 else unverified(
+        "m^2", "표면적 A 미입력 (CAD 실측 또는 3D 모델)")
     rho = mat.density
 
     if area.known and rho.known:
@@ -734,7 +854,8 @@ def tab_helmet(s):
                                marker_color=[ACCENT, GRAYS[2], GRAYS[3]]))
         plotly_layout(fig, "", "셸 질량 [g]", 300)
         st.plotly_chart(fig, width="stretch", config=PLOT_CONFIG)
-        tgt = st.number_input("목표 셸 무게 [g] → 허용 두께 역산", 100.0, 2000.0, 557.0, 1.0)
+        tgt = st.number_input("목표 셸 무게 [g] → 허용 두께 역산", 100.0, 2000.0, 557.0, 1.0,
+                              key="h_target_g")
         t_allow = thickness_for_mass(rho.value, area, units.g_to_kg(tgt), r_ov)
         st.caption(f"허용 두께 {units.m_to_mm(t_allow.value):.2f} mm [{t_allow.label.value}]")
     else:
@@ -775,12 +896,21 @@ def tab_helmet(s):
     a1, a2 = st.columns(2)
     spread_mode = a1.radio("하중 분산 면적 A_spread [가정]", ["일체형: 투영면적 × f", "분할형: 판 1장 면적"])
     if spread_mode.startswith("일체형"):
-        f_mono = a1.number_input("f (투영면적 대비 분산 비율)", 0.01, 1.0, 0.25, 0.01)
-        base_area = area.value if area.known else cov
-        A = assumed(base_area * f_mono, "m^2", f"[가정] 일체형: 투영면적 × {f_mono:.2f}")
-        a1.caption("f 는 문헌 근거가 없는 가정이다. 값에 따라 결과가 크게 달라진다.")
+        f_mono = a1.number_input("f (투영면적 대비 분산 비율)", 0.01, 1.0, step=0.01, key="h_f_mono")
+        proj_cm2 = a1.number_input("투영 면적 [cm²] (0 = 표면적 A 로 대체)", 0.0, 5000.0,
+                                   step=10.0, key="h_proj_cm2",
+                                   help="3D 모델에서 읽으면 자동으로 채워진다")
+        if proj_cm2 > 0:
+            base_area, base_how = units.cm2_to_m2(proj_cm2), "투영면적"
+        elif area.known:
+            base_area, base_how = area.value, "표면적 A(투영면적 미입력)"
+        else:
+            base_area, base_how = cov, "FAST SF 커버리지(대용)"
+        A = assumed(base_area * f_mono, "m^2", f"[가정] 일체형: {base_how} × {f_mono:.2f}")
+        a1.caption(f"기준면 = {base_how} {units.m2_to_cm2(base_area):.0f} cm². "
+                   "f 는 문헌 근거가 없는 가정이다. 값에 따라 결과가 크게 달라진다.")
     else:
-        pa = a1.number_input("판 1장 면적 [cm²]", 1.0, 1000.0, 120.0, 1.0)
+        pa = a1.number_input("판 1장 면적 [cm²]", 1.0, 1000.0, step=1.0, key="h_plate_cm2")
         beta = a1.number_input("인접판 기여율 β (보정 파라미터)", 0.0, 2.0, 0.0, 0.05)
         A = segmented_spread_area(units.cm2_to_m2(pa), s["cfg"].lock,
                                   assumed(beta, "-", "보정 전 사용자 입력") if beta else None)

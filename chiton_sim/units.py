@@ -4,6 +4,7 @@ from __future__ import annotations
 
 G_PER_KG = 1000.0
 MM_PER_M = 1000.0
+CM_PER_M = 100.0
 CM2_PER_M2 = 1.0e4
 
 
@@ -21,6 +22,14 @@ def mm_to_m(mm: float) -> float:
 
 def m_to_mm(m: float) -> float:
     return m * MM_PER_M
+
+
+def cm_to_m(cm: float) -> float:
+    return cm / CM_PER_M
+
+
+def m_to_cm(m: float) -> float:
+    return m * CM_PER_M
 
 
 def cm2_to_m2(cm2: float) -> float:
